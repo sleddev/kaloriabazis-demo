@@ -231,16 +231,27 @@ export async function login(user: string, pw: string): Promise<boolean> {
 // Types
 // ---------------------------------------------------------------------------
 
+/** Server numbers arrive as strings ("28.60") and units as i18n keys ("UNIT_dkg"). */
+export function num(v: unknown): number {
+  const n = typeof v === 'number' ? v : parseFloat(String(v ?? ''));
+  return Number.isFinite(n) ? n : 0;
+}
+
+export function unitLabel(u: unknown): string {
+  const s = String(u ?? '').trim();
+  if (!s) return '';
+  return s.startsWith('UNIT_') ? s.slice(5).toLowerCase() : s;
+}
+
 export interface SearchItem {
   id: string; // "2088_0"
   eaten_food: number;
-  food_id: number;
-  obj_id: number;
-  clear_name: string;
-  cName: string;
-  pic_id: number;
-  dWeight?: number;
-  nCalorie?: number;
+  food_id: string;
+  obj_id: string;
+  name: string; // display name (verified: results2 rows use `name`)
+  piece: string; // "100 g"
+  cal: string; // "143 kcal"
+  pic_id?: string;
   is_fav?: number;
   fav_id?: number;
   [key: string]: unknown;
@@ -269,30 +280,30 @@ export interface SportSearchResponse {
 }
 
 export interface DiaryEntry {
-  nID: number;
+  nID: string; // server sends it as a string
   food_id: string;
   syn_name?: string;
   f_name?: string;
   cDisplayName?: string;
-  nCalorie: number;
-  nProtein?: number;
-  nFat?: number;
-  nCarbo?: number;
-  nQuantity?: number;
+  nCalorie: string;
+  nProtein?: string;
+  nFat?: string;
+  nCarbo?: string;
+  nQuantity?: string;
   nFoodUnitRef?: number;
-  unitDisplayName?: string;
-  nDayoftimeRef: number;
+  unitDisplayName?: string; // i18n key, e.g. "UNIT_dkg" — use unitLabel()
+  nDayoftimeRef: string; // "1".."6" — compare with Number()
   hour_min?: string;
   [key: string]: unknown;
 }
 
 export interface MealStat {
   bSum: number;
-  nDayoftimeRef: number;
-  nCalorie: number;
-  nProtein: number;
-  nFat: number;
-  nCarbo: number;
+  nDayoftimeRef: string;
+  nCalorie: string;
+  nProtein?: string;
+  nFat?: string;
+  nCarbo?: string;
   [key: string]: unknown;
 }
 
@@ -359,7 +370,7 @@ export async function addFood(params: {
 }
 
 /** Delete a diary entry (id = nID from getDay). */
-export async function delFood(id: number, date: string): Promise<DiaryDay> {
+export async function delFood(id: string | number, date: string): Promise<DiaryDay> {
   const r = await http(
     `/food.php?show=delfood&return_json=1&id=${id}&date=${date}`,
     { referer: BASE + '/naplo' }

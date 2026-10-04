@@ -15,6 +15,7 @@ import {
   SearchItem,
   SessionExpiredError,
   addFood,
+  num,
   searchFood,
 } from '../lib/kb';
 
@@ -81,7 +82,7 @@ export default function SearchScreen() {
         date,
         boxdayoftime: slot,
       });
-      Alert.alert('Hozzáadva', `${item.clear_name || item.cName} → ${Math.round(updated.rfoodsum)} kcal napösszesen`);
+      Alert.alert('Hozzáadva', `${item.name || item.cName} → ${Math.round(num(updated.rfoodsum))} kcal napösszesen`);
       router.back();
     } catch (e) {
       if (e instanceof SessionExpiredError) setError('A session lejárt — jelentkezz be újra.');
@@ -113,7 +114,7 @@ export default function SearchScreen() {
           <Text style={s.section}>Kedvencek</Text>
           {favmeals.map((it) => (
             <View key={`fav-${it.id}`} style={s.item}>
-              <Text style={s.itemName}>⭐ {it.clear_name || it.cName}</Text>
+              <Text style={s.itemName}>⭐ {String(it.name || it.cName || 'kedvenc étel')}</Text>
               <Text style={s.itemSub}>kedvenc étel — hozzáadás a weben</Text>
             </View>
           ))}
@@ -126,7 +127,7 @@ export default function SearchScreen() {
           {items.map((it) =>
             selected?.id === it.id ? (
               <View key={it.id} style={s.editor}>
-                <Text style={s.itemName}>{it.clear_name || it.cName}</Text>
+                <Text style={s.itemName}>{String(it.name || it.cName || '?')}</Text>
                 <View style={s.units}>
                   {FOOD_UNITS.map((u) => (
                     <Pressable
@@ -159,10 +160,12 @@ export default function SearchScreen() {
               </View>
             ) : (
               <Pressable key={it.id} style={s.item} onPress={() => { setSelected(it); setQuan('100'); }}>
-                <Text style={s.itemName}>{it.clear_name || it.cName}</Text>
-                {typeof it.nCalorie === 'number' ? (
-                  <Text style={s.itemSub}>{Math.round(it.nCalorie)} kcal{it.dWeight ? ` · ${it.dWeight} g` : ''}</Text>
-                ) : null}
+                <Text style={s.itemName}>{String(it.name || it.cName || '?')}</Text>
+                <Text style={s.itemSub}>
+                  {[it.piece && it.piece !== '100 g' ? it.piece : '', it.cal || it.kcal_and_unit || '']
+                    .filter(Boolean)
+                    .join(' · ') || 'részletek'}
+                </Text>
               </Pressable>
             )
           )}

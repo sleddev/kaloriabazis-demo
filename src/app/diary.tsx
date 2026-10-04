@@ -19,6 +19,8 @@ import {
   getDay,
   isStat,
   logout,
+  num,
+  unitLabel,
   shiftDots,
   todayDots,
 } from '../lib/kb';
@@ -78,7 +80,7 @@ export default function DiaryScreen() {
   }
 
   const totals = day
-    ? { kcal: day.rfoodsum, p: day.rfoodsumProtein, c: day.rfoodsumCarbo, f: day.rfoodsumFat }
+    ? { kcal: num(day.rfoodsum), p: num(day.rfoodsumProtein), c: num(day.rfoodsumCarbo), f: num(day.rfoodsumFat) }
     : null;
 
   return (
@@ -115,7 +117,9 @@ export default function DiaryScreen() {
       ) : null}
 
       {MEALS.map((meal) => {
-        const rows = (day?.results || []).filter((r) => r.nDayoftimeRef === meal.id);
+        const rows = (day?.results || []).filter(
+          (r) => num(r.nDayoftimeRef) === meal.id
+        );
         const entries = rows.filter((r) => !isStat(r)) as DiaryEntry[];
         const stat = rows.find((r) => isStat(r));
         if (entries.length === 0 && !stat) return null;
@@ -123,17 +127,19 @@ export default function DiaryScreen() {
           <View key={meal.id} style={s.meal}>
             <Text style={s.mealName}>
               {meal.label}
-              {stat ? <Text style={s.mealKcal}> · {Math.round(stat.nCalorie)} kcal</Text> : null}
+              {stat ? <Text style={s.mealKcal}> · {Math.round(num(stat.nCalorie))} kcal</Text> : null}
             </Text>
             {entries.map((e) => (
-              <Pressable key={e.nID} style={s.row} onPress={() => confirmDelete(e)}>
+              <Pressable key={String(e.nID)} style={s.row} onPress={() => confirmDelete(e)}>
                 <View style={s.rowMain}>
-                  <Text style={s.rowName}>{e.syn_name || e.f_name || e.cDisplayName || '?'}</Text>
+                  <Text style={s.rowName}>{(e.syn_name || e.f_name || e.cDisplayName || '?').trim()}</Text>
                   <Text style={s.rowSub}>
-                    {e.nQuantity ?? ''} {e.unitDisplayName ?? ''} {e.hour_min ? `· ${e.hour_min}` : ''}
+                    {[String(e.nQuantity ?? '').replace(/\.00$/, ''), unitLabel(e.unitDisplayName), e.hour_min ? `· ${e.hour_min}` : '']
+                      .filter(Boolean)
+                      .join(' ')}
                   </Text>
                 </View>
-                <Text style={s.rowKcal}>{Math.round(e.nCalorie)} kcal</Text>
+                <Text style={s.rowKcal}>{Math.round(num(e.nCalorie))} kcal</Text>
               </Pressable>
             ))}
           </View>
