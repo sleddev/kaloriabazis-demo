@@ -83,8 +83,13 @@ export function captureSession(res: Response): void {
   const m = getSetCookie(res).match(/myPHP83SESSID=([^;\s]+)/);
   if (m) {
     sessionCookie = m[1];
-    void SecureStore.setItemAsync(SESSION_KEY, sessionCookie);
+    // Persisted only after a successful login (see login()) — an anonymous
+    // warm-up session must not outlive the process.
   }
+}
+
+function persistSession(): void {
+  if (sessionCookie) void SecureStore.setItemAsync(SESSION_KEY, sessionCookie);
 }
 
 export function getSession(): string | null {
@@ -186,6 +191,10 @@ function parseJson(text: string): unknown {
 
 /** Warm up a session, log the user in. Returns true on success. */
 export async function login(user: string, pw: string): Promise<boolean> {
+  // Start from a clean jar: a stale persisted cookie would make the homepage
+  // render logged-in — with no `myt` form — and break the flow.
+  logout();
+
   // 1. warm-up (paced=false: first call, nothing to space out)
   await http('/fooldal', { referer: BASE + '/', paced: false });
 
@@ -193,10 +202,19 @@ export async function login(user: string, pw: string): Promise<boolean> {
   //    the form with the `myt` CSRF token lives on the homepage and POSTs to
   //    /bejelentkezes with fields txtusern / txtpassw (verified live).
   const page = await http('/', { referer: BASE + '/' });
+  if (page.text.includes('Kijelentkez')) {
+    return true; // already logged in with this fresh jar
+  }
   const m =
     page.text.match(/id=["']myt["'][^>]*value=["']([^"']+)["']/) ||
     page.text.match(/value=["']([^"']+)["'][^>]*id=["']myt["']/);
-  if (!m) throw new Error('Could not find the myt token on the homepage');
+  if (!m) {
+    // Diagnostic: surface what the server actually sent so a mismatch is
+    // visible in the UI instead of a dead end.
+    throw new Error(
+      `No myt token (status ${page.res.status}, ${page.text.length} bytes). Start: ${page.text.slice(0, 200)}`
+    );
+  }
 
   // 3. POST the real login form
   const post = await http('/bejelentkezes', {
@@ -204,7 +222,9 @@ export async function login(user: string, pw: string): Promise<boolean> {
     post: { mode: 'get', myt: m[1], txtusern: user, txtpassw: pw },
   });
   assertSession(post.text);
-  return post.text.includes('Kijelentkez');
+  const ok = post.text.includes('Kijelentkez');
+  if (ok) persistSession();
+  return ok;
 }
 
 // ---------------------------------------------------------------------------
