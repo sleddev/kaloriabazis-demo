@@ -189,17 +189,19 @@ export async function login(user: string, pw: string): Promise<boolean> {
   // 1. warm-up (paced=false: first call, nothing to space out)
   await http('/fooldal', { referer: BASE + '/', paced: false });
 
-  // 2. login page → CSRF token `myt`
-  const page = await http('/login', { referer: BASE + '/' });
+  // 2. homepage. NOTE: /login redirects (302) to / since the 2026-10 redeploy —
+  //    the form with the `myt` CSRF token lives on the homepage and POSTs to
+  //    /bejelentkezes with fields txtusern / txtpassw (verified live).
+  const page = await http('/', { referer: BASE + '/' });
   const m =
-    page.text.match(/name=["']myt["'][^>]*value=["']([^"']+)["']/) ||
-    page.text.match(/value=["']([^"']+)["'][^>]*name=["']myt["']/);
-  if (!m) throw new Error('Could not find the myt token on the login page');
+    page.text.match(/id=["']myt["'][^>]*value=["']([^"']+)["']/) ||
+    page.text.match(/value=["']([^"']+)["'][^>]*id=["']myt["']/);
+  if (!m) throw new Error('Could not find the myt token on the homepage');
 
-  // 3. POST credentials
-  const post = await http('/login', {
-    referer: BASE + '/login',
-    post: { myuser: user, mypw: pw, myt: m[1] },
+  // 3. POST the real login form
+  const post = await http('/bejelentkezes', {
+    referer: BASE + '/',
+    post: { mode: 'get', myt: m[1], txtusern: user, txtpassw: pw },
   });
   assertSession(post.text);
   return post.text.includes('Kijelentkez');
