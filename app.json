@@ -1,0 +1,12 @@
+{
+  "expo": {
+    "name": "Kaloriabázis",
+    "slug": "kaloriabazis-demo",
+    "version": "0.1.0",
+    "scheme": "kaloriabazis",
+    "orientation": "portrait",
+    "platforms": ["android", "ios"],
+    "android": { "package": "hu.demo.kaloriabazis" },
+    "extra": { "baseUrl": "https://kaloriabazis.hu" }
+  }
+}
