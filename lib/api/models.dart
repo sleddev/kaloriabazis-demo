@@ -95,6 +95,18 @@ String unitLabel(String? key) {
   return k.replaceAll('_', ' ').toLowerCase();
 }
 
+/// Global unit ids seen in diary data (the per-food list comes from getmenew).
+const knownUnitLabels = {
+  9: 'darab',
+  11: 'adag',
+  15: 'közepes',
+  18: 'kicsi',
+  22: 'nagy',
+  24: 'g',
+  25: 'dkg',
+  26: 'kg',
+};
+
 /// Builds the site's food-picture URL from a `pic_id` + `clear_name` pair
 /// (port of `mbf_create_pic_name` in the site's func JS).
 String? foodPicUrl(int? picId, String? clearName, {bool big = false}) {
@@ -137,8 +149,8 @@ class Macros {
   final double carbs;
   final double fat;
 
-  Macros operator +(Macros o) => Macros(
-      kcal + o.kcal, protein + o.protein, carbs + o.carbs, fat + o.fat);
+  Macros operator +(Macros o) =>
+      Macros(kcal + o.kcal, protein + o.protein, carbs + o.carbs, fat + o.fat);
 }
 
 /// One food row of a diary day.
@@ -167,7 +179,7 @@ class DiaryEntry {
   final String unitText;
   final Meal meal;
 
-  /// "<obj id>_<synonym>" — what addfood/getmenew take.
+  /// `<obj id>_<synonym>` — what addfood/getmenew take.
   final String foodRef;
   final String objId;
   final double grams;
@@ -175,16 +187,22 @@ class DiaryEntry {
   factory DiaryEntry.fromJson(Map<String, dynamic> j) {
     final urlId = strOf(j['url_id']) ?? '${j['nFoodID']}_0';
     final qty = numOf(j['nQuantity']);
-    final unitName = strOf(j['unitDisplayName2']) ??
-        unitLabel(strOf(j['unitDisplayName']));
+    final unitName =
+        strOf(j['unitDisplayName2']) ?? unitLabel(strOf(j['unitDisplayName']));
     return DiaryEntry(
       id: '${j['nID']}',
-      name: stripTags(strOf(j['cDisplayName']) ??
-          strOf(j['f_name']) ??
-          strOf(j['syn_name']) ??
-          '?'),
-      macros: Macros(numOf(j['nCalorie']), numOf(j['nProtein']),
-          numOf(j['nCarbo']), numOf(j['nFat'])),
+      name: stripTags(
+        strOf(j['cDisplayName']) ??
+            strOf(j['f_name']) ??
+            strOf(j['syn_name']) ??
+            '?',
+      ),
+      macros: Macros(
+        numOf(j['nCalorie']),
+        numOf(j['nProtein']),
+        numOf(j['nCarbo']),
+        numOf(j['nFat']),
+      ),
       quantity: qty,
       unitId: intOf(j['nFoodUnitRef']),
       unitText: strOf(j['unit_text']) ?? '${_fmtQty(qty)} $unitName',
@@ -220,13 +238,13 @@ class RecentFood {
   String get objId => foodRef.split('_').first;
 
   factory RecentFood.fromJson(Map<String, dynamic> j) => RecentFood(
-        name: stripTags(strOf(j['syn_name']) ?? strOf(j['f_name']) ?? '?'),
-        foodRef: '${j['f_nObjID']}_${intOf(j['nSynonymFoodRef'])}',
-        quantity: numOf(j['nQuantity']),
-        unitId: intOf(j['nFoodUnitRef']),
-        meal: Meal.byId(intOf(j['nDayoftimeRef'])),
-        kcal: numOf(j['nCalorie']),
-      );
+    name: stripTags(strOf(j['syn_name']) ?? strOf(j['f_name']) ?? '?'),
+    foodRef: '${j['f_nObjID']}_${intOf(j['nSynonymFoodRef'])}',
+    quantity: numOf(j['nQuantity']),
+    unitId: intOf(j['nFoodUnitRef']),
+    meal: Meal.byId(intOf(j['nDayoftimeRef'])),
+    kcal: numOf(j['nCalorie']),
+  );
 }
 
 /// The full diary day (`getfoods` / every write with `return_json=1`).
@@ -273,8 +291,12 @@ class DiaryDay {
     return DiaryDay(
       date: date,
       entries: entries,
-      totals: Macros(numOf(j['rfoodsum']), numOf(j['rfoodsumProtein']),
-          numOf(j['rfoodsumCarbo']), numOf(j['rfoodsumFat'])),
+      totals: Macros(
+        numOf(j['rfoodsum']),
+        numOf(j['rfoodsumProtein']),
+        numOf(j['rfoodsumCarbo']),
+        numOf(j['rfoodsumFat']),
+      ),
       recent: recent,
       pics: PicRef.mapOf(j['obj_id_2_pic_id']),
     );
@@ -297,7 +319,7 @@ class FoodHit {
     this.pic,
   });
 
-  /// "<obj id>_<synonym>".
+  /// `<obj id>_<synonym>`.
   final String ref;
   final String foodId;
   final String name;
@@ -351,6 +373,7 @@ class FoodUnit {
 /// Unit list + per-gram nutrients (`getmenew`).
 class FoodInfo {
   FoodInfo({
+    required this.foodId,
     required this.units,
     required this.kcalPerG,
     required this.proteinPerG,
@@ -359,6 +382,9 @@ class FoodInfo {
     required this.isFavourite,
   });
 
+  /// Food row id (`getmenew_food_id`). Differs from the object id in the
+  /// diary/search ref; `savemodeitemfood` needs this one.
+  final String foodId;
   final List<FoodUnit> units;
   final double kcalPerG;
   final double proteinPerG;
@@ -375,11 +401,14 @@ class FoodInfo {
     final units = <FoodUnit>[];
     for (final u in (j['getme'] as List?) ?? const []) {
       if (u is Map) {
-        units.add(FoodUnit(intOf(u['ID']), '${u['Name']}', numOf(u['nWeight'])));
+        units.add(
+          FoodUnit(intOf(u['ID']), '${u['Name']}', numOf(u['nWeight'])),
+        );
       }
     }
     final fav = j['fav'];
     return FoodInfo(
+      foodId: '${j['getmenew_food_id'] ?? ''}',
       units: units,
       kcalPerG: numOf(j['calperg']),
       proteinPerG: numOf(j['protperg']),

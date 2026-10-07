@@ -48,10 +48,9 @@ class LoginFailed extends KbException {
 
 /// Serial token bucket: up to [burst] quick calls, then one per [refill].
 class _Pacer {
-  _Pacer({this.burst = 4, this.refill = const Duration(milliseconds: 1800)});
+  static const burst = 4;
+  static const refill = Duration(milliseconds: 1800);
 
-  final int burst;
-  final Duration refill;
   late double _tokens = burst.toDouble();
   DateTime _last = DateTime.now();
   Future<void> _tail = Future.value();
@@ -67,9 +66,9 @@ class _Pacer {
 
   Future<void> _take() async {
     final now = DateTime.now();
-    _tokens = (_tokens +
-            now.difference(_last).inMilliseconds / refill.inMilliseconds)
-        .clamp(0, burst.toDouble());
+    _tokens =
+        (_tokens + now.difference(_last).inMilliseconds / refill.inMilliseconds)
+            .clamp(0, burst.toDouble());
     _last = now;
     if (_tokens < 1) {
       final waitMs = ((1 - _tokens) * refill.inMilliseconds).ceil();
@@ -119,8 +118,14 @@ class KbClient {
       // Ignore attribute look-alikes that can follow a comma in `expires`.
       // `mob_for_a` is pinned: a mobile-flagged session makes some endpoints
       // (e.g. getdaily) answer `{"type":"1"}`.
-      if (const {'expires', 'path', 'domain', 'Max-Age', 'SameSite', 'mob_for_a'}
-          .contains(name)) {
+      if (const {
+        'expires',
+        'path',
+        'domain',
+        'Max-Age',
+        'SameSite',
+        'mob_for_a',
+      }.contains(name)) {
         continue;
       }
       if (value.isEmpty || value == 'deleted') {
@@ -147,7 +152,9 @@ class KbClient {
           ..headers.addAll({
             'User-Agent': _userAgent,
             'Referer': referer,
-            'Cookie': cookies.entries.map((e) => '${e.key}=${e.value}').join('; '),
+            'Cookie': cookies.entries
+                .map((e) => '${e.key}=${e.value}')
+                .join('; '),
             if (ajax) 'X-Requested-With': 'XMLHttpRequest',
           });
         if (body != null) req.bodyFields = body;
@@ -156,8 +163,9 @@ class KbClient {
           res = await _http.send(req).timeout(const Duration(seconds: 25));
         } on TimeoutException {
           throw KbException(
-              'A szerver nem válaszol. Lehet, hogy túl sok kérés ment ki — '
-              'próbáld újra pár perc múlva.');
+            'A szerver nem válaszol. Lehet, hogy túl sok kérés ment ki — '
+            'próbáld újra pár perc múlva.',
+          );
         } on Exception catch (e) {
           throw KbException('Hálózati hiba: $e');
         }
@@ -193,7 +201,9 @@ class KbClient {
     _assertSession(text);
     final t = text.trim();
     if (!t.startsWith('{') && !t.startsWith('[')) {
-      throw KbException('Váratlan válasz: ${t.length > 80 ? t.substring(0, 80) : t}');
+      throw KbException(
+        'Váratlan válasz: ${t.length > 80 ? t.substring(0, 80) : t}',
+      );
     }
     return jsonDecode(t);
   }
@@ -223,8 +233,8 @@ class KbClient {
     clearSession();
     await _send('/fooldal', referer: '$kBase/', ajax: false);
     final home = await _send('/', referer: '$kBase/', ajax: false);
-    final m = RegExp(r'''id=["']myt["'][^>]*value=["']([^"']+)''')
-            .firstMatch(home) ??
+    final m =
+        RegExp(r'''id=["']myt["'][^>]*value=["']([^"']+)''').firstMatch(home) ??
         RegExp(r'''value=["']([^"']+)["'][^>]*id=["']myt["']''')
             .firstMatch(home);
     if (m == null) throw KbException('Nem található a bejelentkezési űrlap.');
@@ -251,7 +261,9 @@ class KbClient {
   /// Returns the nickname, or null when the session is no longer valid.
   Future<String?> checkSession() async {
     if (!hasSession) return null;
-    final nick = _nickFrom(await _send('/naplo', referer: '$kBase/', ajax: false));
+    final nick = _nickFrom(
+      await _send('/naplo', referer: '$kBase/', ajax: false),
+    );
     if (nick == null) clearSession();
     return nick;
   }
@@ -283,34 +295,33 @@ class KbClient {
     required int unitId,
     required double quantity,
     required Meal meal,
-  }) =>
-      _day(date, {
-        'show': 'addfood',
-        'id': foodRef,
-        'boxme': unitId,
-        'quan': _numStr(quantity),
-        'date': dotDate(date),
-        'boxdayoftime': meal.id,
-      });
+  }) => _day(date, {
+    'show': 'addfood',
+    'id': foodRef,
+    'boxme': unitId,
+    'quan': _numStr(quantity),
+    'date': dotDate(date),
+    'boxdayoftime': meal.id,
+  });
 
   Future<DiaryDay> editEntry({
     required DateTime date,
     required DiaryEntry entry,
+    required String foodId,
     required int unitId,
     required double quantity,
     required Meal meal,
-  }) =>
-      _day(date, {
-        'show': 'savemodeitemfood',
-        'plusminus': 0,
-        'boxme': unitId,
-        'boxdayoftimemod': meal.id,
-        'quan': _numStr(quantity),
-        'id': entry.id,
-        'date': dotDate(date),
-        'hour_min': -1,
-        'getmenew_food_id': entry.objId,
-      });
+  }) => _day(date, {
+    'show': 'savemodeitemfood',
+    'plusminus': 0,
+    'boxme': unitId,
+    'boxdayoftimemod': meal.id,
+    'quan': _numStr(quantity),
+    'id': entry.id,
+    'date': dotDate(date),
+    'hour_min': -1,
+    'getmenew_food_id': foodId,
+  });
 
   Future<DiaryDay> deleteEntry(DateTime date, String entryId) =>
       _day(date, {'show': 'delfood', 'id': entryId, 'date': dotDate(date)});
@@ -320,7 +331,9 @@ class KbClient {
   // ---------------------------------------------------------------------------
 
   Future<SearchPage> search(String q, {int page = 1, int size = 20}) async {
-    final j = await _json('/getfood.php?${_qs({'q': q, 'p': page, 's': size})}');
+    final j = await _json(
+      '/getfood.php?${_qs({'q': q, 'p': page, 's': size})}',
+    );
     if (j is! Map<String, dynamic>) return SearchPage(0, []);
     final pics = PicRef.mapOf(j['food_id_2_pic_id']);
     final hits = [
@@ -331,22 +344,25 @@ class KbClient {
   }
 
   Future<FoodInfo> foodInfo(String foodRef) async {
-    final j = await _json('/food.php?${_qs({'show': 'getmenew', 'id': foodRef})}');
+    final j = await _json(
+      '/food.php?${_qs({'show': 'getmenew', 'id': foodRef})}',
+    );
     if (j is! Map<String, dynamic>) throw KbException('Nincs adat az ételhez.');
     return FoodInfo.fromJson(j);
   }
 
   /// Server-side calculation, for units without a known gram weight.
   Future<Macros> calcFood(String foodRef, int unitId, double qty) async {
-    final j = await _json('/food.php?${_qs({
-          'show': 'calcfooddetail',
-          'id': foodRef,
-          'boxme': unitId,
-          'quan': _numStr(qty),
-        })}');
+    final j = await _json(
+      '/food.php?${_qs({'show': 'calcfooddetail', 'id': foodRef, 'boxme': unitId, 'quan': _numStr(qty)})}',
+    );
     if (j is! Map) return Macros.zero;
-    return Macros(numOf(j['cal']), numOf(j['feherje']), numOf(j['szen']),
-        numOf(j['zsir']));
+    return Macros(
+      numOf(j['cal']),
+      numOf(j['feherje']),
+      numOf(j['szen']),
+      numOf(j['zsir']),
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -368,31 +384,28 @@ class KbClient {
   }
 
   Future<void> setDailyGoal(int kcal) async {
-    final t = await _send('/food.php?${_qs({
-          'show': 'setDaily',
-          'boxdaily': 1,
-          'boxdailytype': 1,
-          'dailyquan': kcal,
-        })}');
+    final t = await _send(
+      '/food.php?${_qs({'show': 'setDaily', 'boxdaily': 1, 'boxdailytype': 1, 'dailyquan': kcal})}',
+    );
     _assertSession(t);
   }
 
   /// Latest body weight in kg (from the metrics form), or null.
   Future<double?> getWeight(DateTime date) async {
     final t = await _send(
-        '/food.php?${_qs({'show': 'getmetrics', 'date': dotDate(date)})}');
+      '/food.php?${_qs({'show': 'getmetrics', 'date': dotDate(date)})}',
+    );
     _assertSession(t);
-    final m = RegExp(r"weight_and_height_w'\s+value='([0-9.,]*)'").firstMatch(t);
+    final m = RegExp(r"weight_and_height_w'\s+value='([0-9.,]*)'")
+        .firstMatch(t);
     final v = numOf(m?.group(1));
     return v > 0 ? v : null;
   }
 
   Future<void> setWeight(DateTime date, double kg) async {
-    final t = await _send('/food.php?${_qs({
-          'show': 'addweight',
-          'date': dotDate(date),
-          'weight': _numStr(kg),
-        })}');
+    final t = await _send(
+      '/food.php?${_qs({'show': 'addweight', 'date': dotDate(date), 'weight': _numStr(kg)})}',
+    );
     _assertSession(t);
   }
 
