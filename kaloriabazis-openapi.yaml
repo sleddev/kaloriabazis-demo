@@ -1,0 +1,4436 @@
+openapi: 3.1.0
+info:
+  title: KalóriaBázis (kaloriabazis.hu) — unofficial API specification
+  version: 1.0.0 (reverse-engineered 2026-10-03)
+  description: "Reverse-engineered REST-ish API of **kaloriabazis.hu** (the most-used Hungarian calorie-counting\n\
+    service, ~600k users). The API was mapped by extracting every AJAX call from the site's JavaScript\
+    \ bundle\n(func*.js) and by probing the endpoints live.\n\n## How the API works\n\n* One-Endpoint-Many-Actions\
+    \ pattern: most logic lives behind `/food.php`, `/food2.php`, `/food_operations.php`,\n  `/vote_ajax.php`,\
+    \ `/price_ajax.php` and `/barcode_ajax.php`; each request carries a `show=<action>` parameter\n  that\
+    \ selects the handler. Requests are `GET` (jQuery `$.getJSON`/`$.ajax`), never `POST`, and send\n\
+    \  `X-Requested-With: XMLHttpRequest`.\n* Search lives in its own endpoint: `/getfood.php`.\n* Chart\
+    \ data lives in `/PCC_pie.php`, `/PCC_pie2.php`, `/PCC_weight.php`, `/PCC_weight2.php` (pie/line data\
+    \ for the\n  diary graphs), plus `/triplet_build.php` for composed (\"triplet\") foods.\n* `/cardcancel_234786583.php`\
+    \ is the obfuscated payment-card-cancel endpoint.\n\n## Session and guard (important)\n\n* Every request\
+    \ needs a live PHP session: first visit **any** page (e.g. `https://kaloriabazis.hu/fooldal`) to get\
+    \ the\n  `myPHP83SESSID` cookie, then call the endpoints with the same cookie jar. A cold session\
+    \ returns the guard.\n* The server checks that requests look like the real frontend: browser `User-Agent`,\
+    \ `X-Requested-With: XMLHttpRequest`,\n  and a matching `Referer` (e.g. `https://kaloriabazis.hu/naplo`\
+    \ for diary calls). Requests that fail these checks get\n  the body `die_with_text arjrjkrk` (HTTP\
+    \ 200, text/plain). This is the site's lightweight anti-scraping guard.\n* Bursting many requests\
+    \ from one IP triggers a temporary tarpit: the server accepts the TCP connection but never\n  responds\
+    \ (curl sees `HTTP 000` after ~25 s). The lockout lasts on the order of minutes to tens of minutes.\n\
+    \  Keep at most a few requests per minute.\n* An **unknown `show` value never returns** (same tarpit\
+    \ behaviour) — only enumerate actions listed here.\n* Session-expiry responses: HTML/text pages contain\
+    \ `###TIMEOUT###`, JSON responses contain `{\"type\":\"1\"}` with an\n  optional `error` message (the\
+    \ client then shows the login dialog).\n* Anonymous access: only a handful of actions work without\
+    \ login (search, name/id lookups, unit lists, food datasheet,\n  site statistics, top-300 list, barcode\
+    \ lookup, calculations). Everything that mutates diary or user data requires a\n  logged-in session.\n\
+    \n## Conventions\n\n* Object id strings look like `\"1147_0\"` — the part before `_` is the food/recipe\
+    \ id, after `_` the unit id (`0` =\n  the default unit). `getid` strips the `_0` part for you.\n*\
+    \ Diary dates use `YYYY-MM-DD` in AJAX parameters (the website itself shows Hungarian dots format).\n\
+    * Meal slots (`tod` / `boxdayoftime`): 0 breakfast, 1 morning snack, 2 lunch, 3 afternoon snack, 4\
+    \ dinner, 5 late-night snack.\n* Unit names are returned as translation keys (`UNIT_dkg`, `UNIT_g`,\
+    \ `UNIT_kozepes`, ...) that the frontend maps to\n  Hungarian strings.\n* Nutrient property ids (`prop_id`)\
+    \ are stable site-wide; see the `NutrientProperty` table in the report.\n* All paths here use `?show=<action>`\
+    \ in the path string so every action appears as its own operation; the `show`\n  parameter is fixed\
+    \ per path.\n\n\n## Authentication flow (verified 2026-10-04)\n\n1. `GET /` — the homepage. Logged\
+    \ out it contains the `#loginForm` with hidden CSRF field `myt`.\n2. `POST /bejelentkezes` — the real\
+    \ form action. Form-urlencoded: `mode=get`, `myt` (from step 1), `txtusern`, `txtpassw`. On success\
+    \ it sets the `myPHP83SESSID` session cookie and serves the logged-in homepage.\n3. Use the cookie\
+    \ on every subsequent call. `GET /login` is NOT the login form any more — it 302-redirects to `/`.\n\
+    4. `GET /kijelentkezes` — logout: 302, destroys the session (afterwards the homepage shows the login\
+    \ form again and per-user calls return guest-level data).\n\nLegacy notes: `POST /login` with `myuser`/`mypw`/`myt`\
+    \ still authenticates, but does not (re)issue the session cookie; do not build on it.\n"
+  x-unofficial: true
+servers:
+- url: https://kaloriabazis.hu
+tags:
+- name: Search
+  description: getfood.php — food and recipe search with paging and nutrient filters.
+- name: Diary & calculations
+  description: 'food.php actions: logging foods and sports, editing, copying, calculating.'
+- name: Food data
+  description: 'food2.php actions: nutrient datasheet, top-300 list, categories.'
+- name: Community / translation voting
+  description: vote_ajax.php — users vote on Hungarian translations of food names.
+- name: Prices & bonus points
+  description: price_ajax.php — crowd-sourced shop prices and bonus points.
+- name: Barcode scanner
+  description: barcode_ajax.php — EAN lookup and linking.
+- name: Food operations
+  description: food_operations.php — bulk food operations, cookie consent, bonus points.
+- name: User settings & account
+  description: daily limits, nutrient settings, body metrics, account deletion.
+- name: Calculators / charts
+  description: PCC_*.php — chart data for the diary graphs and the triplet builder.
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: myPHP83SESSID
+  schemas:
+    SessionStatus:
+      type: object
+      properties:
+        type:
+          type: integer
+          const: 1
+          description: 1 = not logged in / session expired.
+        error:
+          type: string
+          description: Localised error text, e.g. "Nem vagy bejelentkezve!".
+    FoodUnit:
+      type: object
+      properties:
+        ID:
+          type: integer
+        Name:
+          type: string
+          description: 'Translation key: UNIT_dkg, UNIT_g, UNIT_kozepes, UNIT_darab, UNIT_nagy, UNIT_kiskanal,
+            UNIT_unncia, ...'
+        nWeight:
+          type: number
+          description: Unit weight in grams (when the unit is gram-based).
+    CalcResult:
+      type: object
+      properties:
+        cal:
+          type: number
+          description: kcal for the amount.
+        feherje:
+          type: number
+          description: Protein (g) — Hungarian "fehérje".
+        szen:
+          type: number
+          description: Carbohydrate (g) — "szénhidrát".
+        zsir:
+          type: number
+          description: Fat (g) — "zsír".
+        weight:
+          type: number
+          description: Resolved grams (calcfooddetail only).
+    DailyFrame:
+      type: object
+      properties:
+        actualfat:
+          type: number
+        maxfat:
+          type: number
+        actualprotein:
+          type: number
+        maxprotein:
+          type: number
+        actualcarbo:
+          type: number
+        maxcarbo:
+          type: number
+    DayEvaluation:
+      type: object
+      properties:
+        nettokal:
+          type: number
+          description: Net calories of the day (food minus sport).
+        nbevitt:
+          type: number
+          description: Calories ingested.
+        napikeretszazalek:
+          type: number
+          description: '% of the daily frame filled.'
+        egyhet:
+          type: number
+          description: Weekly average kcal.
+        egyhonap:
+          type: number
+          description: Monthly average kcal.
+        felev:
+          type: number
+          description: Half-year average kcal.
+        alapjarat:
+          type: number
+          description: Base metabolism (BMR) kcal.
+        negetes:
+          type: number
+          description: Deficit kcal.
+        msg1:
+          type: string
+        msg2:
+          type: string
+        msg3:
+          type: string
+    SumStat:
+      type: object
+      properties:
+        osszfogyas:
+          type: integer
+          description: Total foods ever logged by all users.
+        fogyasztas:
+          type: integer
+          description: Total logged today.
+        aktivtagok:
+          type: integer
+          description: Active members.
+        kereshetoetelek:
+          type: integer
+          description: Searchable food count.
+    PersDays:
+      type: object
+      properties:
+        daynumber:
+          type: integer
+          description: Diary streak in days.
+    BonusPoints:
+      type: object
+      properties:
+        points:
+          type: integer
+    PicId:
+      type: object
+      properties:
+        pic_id:
+          type: integer
+        clear_name:
+          type: string
+    NameRef:
+      type: object
+      properties:
+        id:
+          type: string
+        cleanedname:
+          type: string
+        url:
+          type: string
+          enum:
+          - etel
+          - recept
+    Top300Item:
+      type: object
+      properties:
+        id:
+          type: string
+          description: '"foodId_unitId"'
+        name:
+          type: string
+        cal:
+          type: number
+          description: kcal/100 g
+      x-note: 'Verified field names: id/name/cal; more columns may be present.'
+    GetIdResult:
+      type: object
+      properties:
+        id:
+          type: string
+    SearchResponse:
+      type: object
+      description: Full search response (live-verified). results1 = matches already eaten today (always
+        empty anonymously); results2 = food matches.
+      properties:
+        rownum1:
+          type: number
+        total1:
+          type: string
+        results1:
+          type: array
+          items:
+            $ref: '#/components/schemas/SearchResultItem'
+        total2:
+          type: string
+          description: total matching foods
+        results2:
+          type: array
+          items:
+            $ref: '#/components/schemas/SearchResultItem'
+        usdaLinks_arr:
+          type: object
+          additionalProperties:
+            type: string
+          description: food_id -> usda import note
+        rec_usda_empty_arr:
+          type: array
+        food_id_2_barcode_pic:
+          type: array
+        food_id_2_fav:
+          type: object
+          description: food_id -> favourite marker
+        food_id_2_pic_id:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              pic_id:
+                type: number
+              clear_name:
+                type: string
+        prices:
+          type: object
+          additionalProperties:
+            type: number
+          description: food_id -> unit price
+        discounts:
+          type: array
+    FavMealItem:
+      type: object
+      properties:
+        nId:
+          type: integer
+          description: Favourite-meal id.
+        cName:
+          type: string
+        nWeight:
+          type: number
+          description: Grams of the stored meal.
+        cal:
+          type: number
+        nProtein:
+          type: number
+        nCarbo:
+          type: number
+        nFat:
+          type: number
+        nTod:
+          type: integer
+          description: Meal slot of the stored meal.
+        dDate:
+          type: string
+          description: Date the meal was captured from (YYYY-MM-DD).
+    SearchResultItem:
+      type: object
+      description: One row of a food search result (live-verified 2026-10-03, post-outage build).
+      properties:
+        id:
+          type: string
+          description: foodunit composite id '<obj_id>_<unit>'
+        eaten_food:
+          type: number
+          description: diary-entry id if this food was eaten today, else 0
+        food_id:
+          type: string
+        obj_id:
+          type: string
+        kuktalink:
+          type: string
+          description: CSS class/href template slot for the food-page link
+        kuktapic:
+          type: string
+        kuktatitle:
+          type: string
+        votedpic:
+          type: string
+        votedpictitle:
+          type: string
+        name:
+          type: string
+        cDesc:
+          type: string
+          description: community-food description
+        pic:
+          type: string
+        pictitle:
+          type: string
+        pictrash:
+          type: string
+        pictrashtitle:
+          type: string
+        piece:
+          type: string
+          description: labelled unit, e.g. '100 g'
+        weight:
+          type: string
+        cal:
+          type: string
+          description: formatted kcal for the unit, e.g. '143 kcal'
+        protein:
+          type: string
+        carbo:
+          type: string
+        fat:
+          type: string
+        link:
+          type: string
+        linkname:
+          type: string
+        link2:
+          type: string
+        unvoteddelvotedpic:
+          type: string
+        unvoteddelvotedpictitle:
+          type: string
+        datasheetlink:
+          type: string
+          description: full food-page URL
+        kcal_and_unit:
+          type: string
+          description: e.g. 'kcal/100g'
+    FoodInfo:
+      type: object
+      properties:
+        boxes:
+          type: array
+          description: '4 boxes: 1 = macros, 2 = minerals (Ásványok), 3 = vitamins (Vitaminok), 4 = fats
+            (Zsírok).'
+          items:
+            $ref: '#/components/schemas/FoodInfoBox'
+        img1:
+          type: string
+        img2:
+          type: string
+        rating_block_obj:
+          type: object
+        fds_data:
+          type: object
+    FoodInfoBox:
+      type: object
+      properties:
+        box_id:
+          type: integer
+        title:
+          type: string
+        lines:
+          type: array
+          items:
+            $ref: '#/components/schemas/FoodInfoLine'
+    FoodInfoLine:
+      type: object
+      properties:
+        prop_id:
+          type: integer
+          description: Nutrient property id (see the nutrient table in the report).
+        prop_id_txt:
+          type: string
+          description: Hungarian display name, sometimes with the English name in parentheses.
+        unit:
+          type: string
+          description: kcal / g / mg / µg / IU / %.
+        prop_val:
+          type: string
+          description: Value per 100 g (or per unit for non-gram foods).
+        from_usda:
+          type: string
+          description: '"1" when the value came from the USDA import.'
+    PieData:
+      type: array
+      items:
+        type: array
+        minItems: 2
+        maxItems: 2
+        items:
+          type: string
+          x-note: key / numeric string
+      x-note: 'Verified example (PCC_pie2, gui=42, id=1147_0): [["MAIN_feherje","13.5"],["MAIN_szenhidrat","0.6"],["MAIN_zsir","12"]]
+        — values are kcal, not percentages.'
+    DiaryDay:
+      type: object
+      x-note: 'Loosely typed: meal sections (tod 0-5) with fu_id entries, totals, sport section, water,
+        etc. See the report for a rendered example.'
+    DiaryEntry:
+      type: object
+      description: 'One diary ENTRY row from getfoods (return_json=1). Verified live 2026-10-04. Mixed
+        typing is real: numeric-looking fields mostly arrive as STRINGS (nID, nCalorie, nQuantity, nDayoftimeRef...)
+        while nProtein/nFat/nCarbo and the boolean flags bSum/edit_able are true numbers. unitDisplayName
+        is an i18n key ("UNIT_dkg"), unitDisplayName2 the plain label ("g"). Field names follow the Hungarian
+        legacy prefixes (n=number, c=string, b=boolean).'
+      properties:
+        nID:
+          type: string
+          description: 'Diary entry (fooduser) id — ARRIVES AS A STRING (verified live: "610620334").
+            This is the id delfood takes.'
+        nFoodID:
+          type: string
+          description: 'Underlying food/recipe id — string (verified: "2088").'
+        food_id:
+          type: string
+          description: 'Food id in the "<id>_<synonym>" string form (verified: "2620126").'
+        syn_name:
+          type: string
+          description: Synonym/display name of the food.
+        f_name:
+          type: string
+          description: Food name.
+        cName:
+          type: string
+          description: 'Chosen synonym name shown for the entry (verified: "Mindegy").'
+        cleanedname:
+          type: string
+          description: 'Slug of the food name (verified: "_tojas").'
+        cDisplayName:
+          type: string
+          description: 'Display name of the entry; may carry a leading space (verified: " Tojás"). Trim
+            before display.'
+        nCalorie:
+          type: string
+          description: 'Calories (kcal) of the entry — STRING (verified: "28.60").'
+        nProtein:
+          type: number
+          description: 'Protein grams — real number (verified: 2.51).'
+        nFat:
+          type: number
+          description: 'Fat grams — real number (verified: 1.9).'
+        nCarbo:
+          type: number
+          description: 'Carbohydrate grams — real number (verified: 0.14).'
+        nQuantity:
+          type: string
+          description: 'Quantity in the chosen unit — STRING (verified: "2.00").'
+        nWeight:
+          type: string
+          description: 'Per-unit weight — STRING (verified: "10.00").'
+        nFoodUnitRef:
+          type: string
+          description: 'Unit id — STRING (verified: "25" = dkg).'
+        unit_id:
+          type: string
+          description: 'Same value as nFoodUnitRef, as string (verified: "25").'
+        unitDisplayName:
+          type: string
+          description: 'Primary unit as an i18n KEY (verified: "UNIT_dkg") — strip the "UNIT_" prefix
+            and lowercase for display.'
+        unitDisplayName2:
+          type: string
+          description: 'Secondary unit as a plain human label (verified: "g").'
+        unit_text:
+          type: string
+          description: 'Combined quantity+unit label (verified: "2 dkg").'
+        nDayoftimeRef:
+          type: string
+          description: 'Meal-of-day slot (1-7) — STRING (verified: "1"). Compare numerically, never strictly.'
+        hour_min:
+          type: string
+          description: Entry time; "0" for freshly added entries, otherwise HH:MM.
+        nHoursMinutes:
+          type: integer
+          description: Entry time encoded as HHMM.
+        bRecept:
+          type: string
+          description: '"1" when the entry is a recipe (verified as string "0").'
+        bOriginal:
+          type: string
+          description: '"1" when the food is the user''s own food (verified as string "0").'
+        bSum:
+          type: integer
+          description: 0 marks an entry row; the interleaved statistics row carries 1 (real number).
+        edit_able:
+          type: integer
+          description: 1 when the entry can be edited by the current user (real number).
+        nSynonymFoodRef:
+          type: string
+          description: Synonym id when the entry uses one; null otherwise.
+          nullable: true
+        sumWeight:
+          type: string
+          description: 'Total weight in grams — STRING (verified: "20.0000").'
+        url:
+          type: string
+          description: 'Relative link slug for the food type (verified: "etel").'
+        url_id:
+          type: string
+          description: 'Food-unit id used in links (verified: "2088_0").'
+        fav_id:
+          type: string
+          description: Favourite id when the food is a favourite; null otherwise.
+          nullable: true
+        fb_table_id:
+          type: string
+          description: Favourite-button table id; null otherwise.
+          nullable: true
+        food_nCreated:
+          type: string
+          description: Creation timestamp of the food, when present; null otherwise.
+          nullable: true
+    MealStat:
+      type: object
+      description: 'Per-meal statistics row from getfoods, interleaved with DiaryEntry rows. Distinguish
+        by bSum === 1 (or by nID === 0). Verified live 2026-10-04: unlike entry rows, its totals are true
+        numbers while nDayoftimeRef is still the string "1".'
+      properties:
+        bSum:
+          type: integer
+          description: '1 marks a statistics row (verified: 1).'
+        nDayoftimeRef:
+          type: string
+          description: 'Meal slot the stats belong to — STRING (verified: "1"), same as entry rows.'
+        nCalorie:
+          type: number
+          description: 'Meal total kcal — real number (verified: 28.6), unlike entry rows.'
+        nProtein:
+          type: number
+          description: Meal total protein — real number.
+        nCarbo:
+          type: number
+          description: Meal total carbohydrate — real number.
+        nFat:
+          type: number
+          description: Meal total fat — real number.
+        nID:
+          type: integer
+          description: Always 0 on a statistics row.
+        nQuantity:
+          type: integer
+          description: Always 0 on a statistics row.
+    DiaryDayJson:
+      type: object return_json=1 — the full diary day as the mobile client consumes it.
+      properties:
+        results:
+          type: array
+          items:
+            oneOf:
+            - $ref: '#/components/schemas/DiaryEntry'
+            - $ref: '#/components/schemas/MealStat'
+          description: Diary entries and per-meal statistics rows interleaved in display order.
+        rfoodsum:
+          type: number
+          description: Day total kcal.
+        rfoodsumProtein:
+          type: number
+          description: Day total protein.
+        rfoodsumCarbo:
+          type: number
+          description: Day total carbohydrate.
+        rfoodsumFat:
+          type: number
+          description: Day total fat.
+        favbuts:
+          description: Favourite buttons payload for the entry dialog.
+          oneOf:
+          - type: array
+          - type: object
+        intermittent:
+          type: object
+          description: 'Intermittent-fasting tracker: time of the last meal.'
+          properties:
+            year:
+              type: integer
+            month:
+              type: integer
+            day:
+              type: integer
+            nHoursMinutes:
+              type: integer
+              description: Last meal time as HHMM.
+        prices:
+          description: Price rows (Ft) when the user has price tracking enabled.
+          oneOf:
+          - type: array
+          - type: object
+        obj_id_2_pic_id:
+          type: object
+          description: Map of food object id to picture id.
+        food_id_2_barcode:
+          type: object
+          description: Map of food id to barcode.
+        seconds_to_midnight:
+          type: integer
+          description: Server hint for when the day rolls over.
+    DailySettings:
+      type: object
+      description: Response of getdaily. type=1 means not-logged-in / session timeout, (requires a logged-in
+        session) carrying an error message.
+      properties:
+        type:
+          type: integer
+          description: 0 when logged in and data valid, 1 on auth failure.
+        error:
+          type: string
+          description: Error message when type=1.
+        boxdailySet:
+          type: string
+          description: Daily-limit mode ('0' off, '1' kcal limit, '2' percentage).
+        txtdailyquan:
+          type: string
+          description: The daily kcal limit value.
+        boxdailyType:
+          type: integer
+          description: Daily-frame chart type (2-5 when premium).
+    IsFav:
+      type: object
+      properties:
+        isfav:
+          type: string
+          description: '''1'' when the food is a favourite (last used quantity/unit then present).'
+        nFoodUnitRef:
+          type: integer
+          description: Unit id to preselect.
+        nQuantity:
+          type: number
+          description: Quantity to prefill.
+    ExpropSettings:
+      type: object
+      description: Response of get_exprop_settings — the 'diary recommendation' dialog (requires a logged-in
+        session) (requires a logged-in session) state.
+      properties:
+        prop_values_arr:
+          type: array
+          description: List of extra-nutrient properties available for the recommendation dialog.
+        exprop_settings:
+          type: array
+          description: Currently selected property indices for the user.
+  responses:
+    SessionError:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              type:
+                const: '1'
+              error:
+                type: string
+            description: Not logged in / session expired.
+          examples:
+            not_logged_in:
+              value:
+                type: '1'
+                error: Nem vagy bejelentkezve!
+    GuardOrTimeout:
+      content:
+        text/plain:
+          schema:
+            type: string
+          examples:
+            timeout:
+              value: '###TIMEOUT### — the PHP session expired; re-visit any page to get a new session.'
+            guard:
+              value: die_with_text arjrjkrk — anti-abuse guard; see the security notes in the API description.
+paths:
+  /getsport.php:
+    get:
+      operationId: search_sports
+      tags:
+      - Search
+      summary: Search sport activities (the sport search box autocomplete).
+      description: 'Live-verified 2026-10-03: response envelope is {results:[], weight, total}. Item shape
+        (13 fields): id ("548_0"), name, cDesc, pic, pictitle, pictrash, pictrashtitle, type, piece (e.g.
+        "1 óra"), weight, cal (e.g. "627 kcal"), link, linkname. NOTE: the query is ACCENT-SENSITIVE (unlike
+        /getfood.php): q=fut returns 0 hits, q=futás returns hits. Params q, p, s, date (the frontend
+        always sends date in yyyy.mm.dd dot format).'
+      parameters:
+      - name: q
+        in: query
+        required: true
+        schema:
+          type: string
+        description: Search term (accent-sensitive, unlike food search).
+      - name: p
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 1
+        description: 1-based page number.
+      - name: s
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 10
+        description: Page size (frontend sends Mbs_flist_max_elements).
+      - name: date
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Diary date, dot format (e.g. 2026.10.03). Probably used to compute calories for the
+          user's weight.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /getfood.php:
+    get:
+      operationId: search_foods
+      tags:
+      - Search
+      summary: Search foods and recipes (the site autocomplete + result list).
+      description: 'The main search engine of the site. Called by the diary search box (desktop + mobile)
+        with paging. The response mixes two result sets: `results1` = your favourite meals matching the
+        query, `results2` = all foods/recipes (both approved and "grey" public ones; see all_public_food).
+        Verified live 2026-10-03: q=tojas returns 16 hits, q="kinder bueno" returns 1 hit.'
+      parameters:
+      - name: q
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Free-text query (name fragment, accent-insensitive).
+        description: Free-text search term (matches name/synonyms).
+      - name: p
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 1
+          description: 1-based page number.
+        description: '1-based page number (live-verified: p=2 returns the second page).'
+      - name: s
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 15
+          description: Page size (the frontend uses 15).
+        description: 'Page size / result count (live-verified: s=1 returns 1 item, s=2 two, s=3 three,
+          s=0 none).'
+      - name: fav
+        in: query
+        required: false
+        schema:
+          type: string
+          description: '"true" = search only favourites.'
+      - name: expropsearch_id
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Nutrient property id filter (e.g. 910 = kcal).
+      - name: expropsearch_inc
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: 1 = must contain the property, 0 = must not.
+      - name: all_public_food
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: 1 = include all public foods (frontend toggles this on empty results).
+      - name: get_speachrecog_unit_id
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: 1 = return the default unit id used by speech recognition.
+      security: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResponse'
+              examples:
+                default:
+                  value:
+                    total1: 0
+                    results1: []
+                    total2: 16
+                    results2:
+                    - id: '2088_0'
+                      eaten_food: 0
+                      food_id: 2088
+                      obj_id: 2088
+                      kuktalink: etellink
+                      kuktapic: ''
+                      kuktatitle: Tojás
+                      votedpic: ''
+                      votedpictitle: ''
+                      name: tojás
+                      cal: 154.0
+                    food_id_2_fav:
+                      '2088': '1'
+  /PCC_pie.php:
+    get:
+      operationId: _pie_pie
+      tags:
+      - Calculators / charts
+      summary: Pie data for sport calories of a diary day. Auth token protected.
+      description: Called by the diary page for its charts. Needs a warmed-up session (fresh browser-like
+        request, see info.description) and the `X` auth token that the frontend generates in `PCC_img2()`
+        from request date + id + size. Verified live for PCC_pie2.
+      parameters:
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: gui
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Layout variant (2 = normal, 42 = large).
+      - name: X
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Auth token from PCC_img2(); without it the data is write-protected/empty.
+      security: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PieData'
+              examples:
+                default:
+                  value:
+                  - - MAIN_feherje
+                    - '13.5'
+                  - - MAIN_szenhidrat
+                    - '0.6'
+                  - - MAIN_zsir
+                    - '12'
+  /PCC_pie2.php:
+    get:
+      operationId: _pie2_pie
+      tags:
+      - Calculators / charts
+      summary: Pie data for food macros of a food id. Auth token protected.
+      description: Called by the diary page for its charts. Needs a warmed-up session (fresh browser-like
+        request, see info.description) and the `X` auth token that the frontend generates in `PCC_img2()`
+        from request date + id + size. Verified live for PCC_pie2.
+      parameters:
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: gui
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Layout variant (2 = normal, 42 = large).
+      - name: X
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Auth token from PCC_img2(); without it the data is write-protected/empty.
+      security: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PieData'
+              examples:
+                default:
+                  value:
+                  - - MAIN_feherje
+                    - '13.5'
+                  - - MAIN_szenhidrat
+                    - '0.6'
+                  - - MAIN_zsir
+                    - '12'
+  /PCC_weight.php:
+    get:
+      operationId: _weight_weight
+      tags:
+      - Calculators / charts
+      summary: Weight-tracking line data. Auth token protected.
+      description: Called by the diary page for its charts. Needs a warmed-up session (fresh browser-like
+        request, see info.description) and the `X` auth token that the frontend generates in `PCC_img2()`
+        from request date + id + size. Verified live for PCC_pie2.
+      parameters:
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: gui
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Layout variant (2 = normal, 42 = large).
+      - name: X
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Auth token from PCC_img2(); without it the data is write-protected/empty.
+      security: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PieData'
+              examples:
+                default:
+                  value:
+                  - - MAIN_feherje
+                    - '13.5'
+                  - - MAIN_szenhidrat
+                    - '0.6'
+                  - - MAIN_zsir
+                    - '12'
+  /PCC_weight2.php:
+    get:
+      operationId: _weight2_weight
+      tags:
+      - Calculators / charts
+      summary: Alternative weight-tracking line data. Auth token protected.
+      description: Called by the diary page for its charts. Needs a warmed-up session (fresh browser-like
+        request, see info.description) and the `X` auth token that the frontend generates in `PCC_img2()`
+        from request date + id + size. Verified live for PCC_pie2.
+      parameters:
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: gui
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Layout variant (2 = normal, 42 = large).
+      - name: X
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Auth token from PCC_img2(); without it the data is write-protected/empty.
+      security: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PieData'
+              examples:
+                default:
+                  value:
+                  - - MAIN_feherje
+                    - '13.5'
+                  - - MAIN_szenhidrat
+                    - '0.6'
+                  - - MAIN_zsir
+                    - '12'
+  /triplet_build.php:
+    get:
+      operationId: triplet_build
+      tags:
+      - Calculators / charts
+      summary: Build a "triplet" (composed food) and return its id.
+      description: Needs a warmed-up session. Returns 0 when the input is not a valid (requires a logged-in
+        session) triplet.
+      parameters:
+      - name: type
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: Triplet type.
+      security: []
+      responses:
+        '200':
+          description: A triplet id or 0 (plain text).
+          content:
+            text/plain:
+              examples:
+                default:
+                  value: '0'
+  /cardcancel_234786583.php:
+    post:
+      operationId: card_cancel
+      tags:
+      - User settings & account
+      summary: Cancel the stored payment card (premium billing). premium-settings dialog.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: HTML/JS result of the cancellation.
+          content:
+            text/html: {}
+  /food.php?show=getid:
+    get:
+      operationId: food_getid
+      tags:
+      - Diary & calculations
+      summary: Resolve a "foodId_unitId" id string to the plain numeric id.
+      parameters:
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      security: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetIdResult'
+  /food.php?show=getname:
+    get:
+      operationId: food_getname
+      tags:
+      - Diary & calculations
+      summary: Get the display name of a food or recipe by id.
+      parameters:
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      security: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            text/plain: {}
+      description: 'Verified live: food.php?show=getname&id=2088_0 → "tojas". Requires a logged-in session.'
+  /food.php?show=getname2:
+    get:
+      operationId: food_getname2
+      tags:
+      - Diary & calculations
+      summary: Get the canonical URL kind ("etel"/"recept"), the cleaned slug name and the numeric id
+        — used to build datasheet links like /etel/<slug>_kcal/<id>.
+      parameters:
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      security: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NameRef'
+  /food.php?show=getname3:
+    get:
+      operationId: food_getname3
+      tags:
+      - Diary & calculations
+      summary: Same as getname2, used for own foods/recipes.
+      parameters:
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      security: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NameRef'
+  /food.php?show=getme:
+    get:
+      operationId: food_getme
+      tags:
+      - Diary & calculations
+      summary: Get the serving-unit list of a food (ID, translation-key name, nWeight in grams).
+      parameters:
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      security: []
+      responses:
+        '200':
+          description: Array of unit options for the food.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/FoodUnit'
+      description: 'Verified live: food.php?show=getme&id=1147_0 → [{"ID":"15","Name":"UNIT_kozepes"},...].
+        Requires a logged-in session.'
+  /food.php?show=getmefu:
+    get:
+      operationId: food_getmefu
+      tags:
+      - Diary & calculations
+      summary: Get the serving-unit list of a recipe (fu variant).
+      parameters:
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      security: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food.php?show=getmesu:
+    get:
+      operationId: food_getmesu
+      tags:
+      - Diary & calculations
+      summary: Get the serving-unit list variant used by the food-creation dialog. {"ID":"5","Name":"UNITS_ora"}
+        ] - the unit list depends on the id type (food vs sport).'
+      parameters:
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      security: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food.php?show=getmenew:
+    get:
+      operationId: food_getmenew
+      tags:
+      - Diary & calculations
+      summary: Get the serving units plus is_food flag for the "add new food" dialog.
+      parameters:
+      - name: food_id_directly
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Food id (skip lookup).
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      security: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food.php?show=getmeisfav:
+    get:
+      operationId: food_getmeisfav
+      tags:
+      - Diary & calculations
+      summary: Get whether a food is a favourite of the user, plus the last used quantity and unit.
+      parameters:
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: Favourite state of the food.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IsFav'
+      description: 'Requires a logged-in session (see info.description). '
+  /food.php?show=getrecmefu:
+    get:
+      operationId: food_getrecmefu
+      tags:
+      - Diary & calculations
+      summary: Get the unit list of a recipe ingredient (rec variant).
+      parameters:
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      security: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food.php?show=getsportme:
+    get:
+      operationId: food_getsportme
+      tags:
+      - Diary & calculations
+      summary: Get the serving-unit list of a sport activity.
+      parameters:
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      security: []
+      responses:
+        '200':
+          description: 'Live-verified 2026-10-03 (id=548_0): JSON object, integer keys 0..n each {ID,
+            Name (UNIT_ constant), nValue (hours per unit, e.g. 7=min: 0.0167, 9=km: 0.1250, 5=ora: 1.0),
+            bDefault}, plus calorie (kcal per 1 hour at user weight), own, fav.'
+          content:
+            application/json: {}
+  /food.php?show=getsportmeisfav:
+    get:
+      operationId: food_getsportmeisfav
+      tags:
+      - Diary & calculations
+      summary: Get whether a sport activity is a favourite plus quantity/unit.
+      parameters:
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+      description: 'Requires a logged-in session (see info.description). '
+  /food.php?show=getfoods:
+    get:
+      operationId: food_getfoods
+      tags:
+      - Diary & calculations
+      summary: Get the diary (food journal) of the logged-in user for one date. return_json=1 returns
+        JSON; without it an HTML fragment.
+      parameters:
+      - name: date
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Diary date in YYYY-MM-DD format (site pages use dots, but AJAX uses dashes).
+      - name: return_json
+        in: query
+        required: false
+        schema:
+          type: integer
+          const: 1
+          description: Return JSON instead of the HTML fragment.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: The full diary day. JSON when return_json=1, otherwise an HTML fragment.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiaryDayJson'
+            text/html:
+              schema:
+                type: string
+                description: HTML fragment used by the desktop client when return_json is absent.
+      description: 'Requires a logged-in session (see info.description). Verified (requires a logged-in
+        session) live (anonymous): returns an empty diary-day object; with a login it returns all diary
+        entries of the date.'
+  /food.php?show=getdaily:
+    get:
+      operationId: food_getdaily
+      tags:
+      - Diary & calculations
+      summary: Get the user's daily calorie limit settings (type, value, error).
+      parameters: []
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: Daily-limit settings.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DailySettings'
+  /food.php?show=getmetrics:
+    get:
+      operationId: food_getmetrics
+      tags:
+      - Diary & calculations
+      summary: Get the body-metrics form values (weight, height, target...) for a date (HTML form).
+      parameters:
+      - name: date
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Diary date in YYYY-MM-DD format (site pages use dots, but AJAX uses dashes).
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            text/html: {}
+      description: Requires a logged-in session (see info.description).  Requires a logged-in session.
+  /food.php?show=getmetricsadmin:
+    get:
+      operationId: food_getmetricsadmin
+      tags:
+      - Diary & calculations
+      summary: Get raw metrics data (admin/debug variant).
+      parameters: []
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food.php?show=getsumstat:
+    get:
+      operationId: food_getsumstat
+      tags:
+      - Diary & calculations
+      summary: 'Global site statistics: all-time logged foods, today total, active members, searchable
+        food count.'
+      parameters:
+      - name: date
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Diary date in YYYY-MM-DD format (site pages use dots, but AJAX uses dashes).
+      security: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SumStat'
+      description: 'Verified live: {"osszfogyas":4520449,"fogyasztas":0,"aktivtagok":0}.'
+  /food.php?show=getsumfogyasztas:
+    get:
+      operationId: food_getsumfogyasztas
+      tags:
+      - Diary & calculations
+      summary: Get the total consumption sum for a date.
+      parameters:
+      - name: date
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Diary date in YYYY-MM-DD format (site pages use dots, but AJAX uses dashes).
+      security: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            text/plain: {}
+  /food2.php?show=getfoodinfo:
+    get:
+      operationId: food2_getfoodinfo
+      tags:
+      - Food data
+      summary: 'Get the full nutrient datasheet of a food/recipe: 4 nutrient boxes, images, category,
+        rating block, moderation state, synonyms. The server expects the referer of the matching /etel/
+        or /recept/ page.'
+      parameters:
+      - name: food_id
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Numeric food id.
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      security: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FoodInfo'
+      description: 'The server checks the HTTP Referer of the request; it must match the public datasheet
+        page of the food (/etel/<slug>_kcal/<id> or /recept/<slug>_kcal/<id>). Verified live 2026-10-03:
+        the response carries 4 boxes (macros, minerals, vitamins, fats — 34 nutrient rows) plus the `fds_data`
+        block (canonical food_id, names, kcal/macro values, category/creator/moderation info, USDA link).'
+  /food.php?show=calcfooddetail:
+    get:
+      operationId: food_calcfooddetail
+      tags:
+      - Diary & calculations
+      summary: Calculate calories, protein, carbo, fat and gram weight for a food + amount + unit (used
+        by the food dialog).
+      parameters:
+      - name: boxme
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Unit id of the chosen measure (from getme), e.g. 25 = dkg.
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      - name: option
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Selected unit id (same as boxme in most dialogs).
+      - name: quan
+        in: query
+        required: true
+        schema:
+          type: number
+          description: Amount in the selected unit.
+      security: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CalcResult'
+  /food.php?show=calckiertekel:
+    get:
+      operationId: food_calckiertekel
+      tags:
+      - Diary & calculations
+      summary: 'Evaluate the diary day: net calories, % of the daily frame, week/month/half-year averages
+        and messages.'
+      parameters:
+      - name: date
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Diary date in YYYY-MM-DD format (site pages use dots, but AJAX uses dashes).
+      - name: filleddailylimit
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Current % of the daily limit filled.
+      - name: radioheads
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Selected daily-limit radio option (calckiertekel).
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DayEvaluation'
+      description: 'Requires a logged-in session (see info.description). Verified (requires a logged-in
+        session) live (anonymous): returns {"type":"1","error":"Nem vagy bejelentkezve!"}.'
+  /food.php?show=calcreccal:
+    get:
+      operationId: food_calcreccal
+      tags:
+      - Diary & calculations
+      summary: Calculate totals for a recipe being composed.
+      parameters: []
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food.php?show=calcreccal2:
+    get:
+      operationId: food_calcreccal2
+      tags:
+      - Diary & calculations
+      summary: Calculate totals for an existing recipe by id.
+      parameters:
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      security: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CalcResult'
+  /food.php?show=calcme:
+    get:
+      operationId: food_calcme
+      tags:
+      - Diary & calculations
+      summary: Calculate kcal/protein/carbo/fat for food id + amount + unit; response is the unit list
+        with the calculation appended.
+      parameters:
+      - name: boxme
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Unit id of the chosen measure (from getme), e.g. 25 = dkg.
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      - name: option
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Selected unit id (same as boxme in most dialogs).
+      - name: quan
+        in: query
+        required: true
+        schema:
+          type: number
+          description: Amount in the selected unit.
+      security: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+      description: 'Verified live: response is the unit list with a "cal" field appended (requires a logged-in
+        session) (calculation result).'
+  /food.php?show=calcmeitemmod:
+    get:
+      operationId: food_calcmeitemmod
+      tags:
+      - Diary & calculations
+      summary: Recalculate kcal for an existing diary entry being edited (id = diary entry nID, not food
+        id).
+      description: 'Requires a logged-in session. Live-verified 2026-10-04: id is the diary entry nID
+        (e.g. 610580866), NOT a food id — with a food id it returns 0. Params actually sent: id, boxme,
+        quan (the `option` param is not sent by the current frontend). Returns a bare number: the recalculated
+        total kcal for that entry with the new quantity/unit (e.g. 143 for 100 g of egg).'
+      parameters:
+      - name: boxme
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Unit id of the chosen measure (from getme), e.g. 25 = dkg.
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      - name: option
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Selected unit id (same as boxme in most dialogs).
+      - name: quan
+        in: query
+        required: true
+        schema:
+          type: number
+          description: Amount in the selected unit.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food.php?show=calcmeitemsportmod:
+    get:
+      operationId: food_calcmeitemsportmod
+      tags:
+      - Diary & calculations
+      summary: Calculation helper for an edited sport diary item.
+      parameters:
+      - name: boxme
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Unit id of the chosen measure (from getme), e.g. 25 = dkg.
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      - name: option
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Selected unit id (same as boxme in most dialogs).
+      - name: quan
+        in: query
+        required: true
+        schema:
+          type: number
+          description: Amount in the selected unit.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+      description: Requires a logged-in session (see info.description).  Requires a logged-in session.
+  /food.php?show=calcmerecitemmod:
+    get:
+      operationId: food_calcmerecitemmod
+      tags:
+      - Diary & calculations
+      summary: Calculation helper for an edited recipe-ingredient diary item.
+      parameters:
+      - name: boxme
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Unit id of the chosen measure (from getme), e.g. 25 = dkg.
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      - name: option
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Selected unit id (same as boxme in most dialogs).
+      - name: quan
+        in: query
+        required: true
+        schema:
+          type: number
+          description: Amount in the selected unit.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food.php?show=calcsportme:
+    get:
+      operationId: food_calcsportme
+      tags:
+      - Diary & calculations
+      summary: Calculate kcal burned for a sport id + amount + unit on a date.
+      parameters:
+      - name: boxme
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Unit id of the chosen measure (from getme), e.g. 25 = dkg.
+      - name: date
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Diary date in YYYY-MM-DD format (site pages use dots, but AJAX uses dashes).
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      - name: option
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Selected unit id (same as boxme in most dialogs).
+      - name: quan
+        in: query
+        required: true
+        schema:
+          type: number
+          description: Amount in the selected unit.
+      security: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            text/plain: {}
+  /food.php?show=calcdailyframe:
+    get:
+      operationId: food_calcdailyframe
+      tags:
+      - Diary & calculations
+      summary: Get actual vs. max protein/carbo/fat of the diary day (the frame at the top of the diary).
+      parameters:
+      - name: date
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Diary date in YYYY-MM-DD format (site pages use dots, but AJAX uses dashes).
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DailyFrame'
+      description: Requires a logged-in session (see info.description).  Requires a logged-in session.
+  /food2.php?show=get_exprop_settings:
+    get:
+      operationId: food2_get_exprop_settings
+      tags:
+      - Food data
+      summary: Get the user's nutrient-column display settings (which columns show in tables).
+      parameters: []
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: Recommendation-dialog settings.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExpropSettings'
+  /food2.php?show=get_pers_days:
+    get:
+      operationId: food2_get_pers_days
+      tags:
+      - Food data
+      summary: Get the diary streak (consecutive days with entries).
+      parameters: []
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PersDays'
+      description: 'Requires a logged-in session (see info.description). Verified (requires a logged-in
+        session) (requires a logged-in session) live (anonymous): returns {"type":"1"}.'
+  /vote_ajax.php?show=get_dialog_data:
+    get:
+      operationId: vote_ajax_get_dialog_data
+      tags:
+      - Community / translation voting
+      summary: Get the translation-vote dialog state of the user (vote options and counters).
+      parameters: []
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /vote_ajax.php?show=get_voteboxpack:
+    get:
+      operationId: vote_ajax_get_voteboxpack
+      tags:
+      - Community / translation voting
+      summary: Get the next unvoted translation term for a term id (vote box pack).
+      parameters:
+      - name: tid
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: Term id (translation system).
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /vote_ajax.php?show=next_text_item:
+    get:
+      operationId: vote_ajax_next_text_item
+      tags:
+      - Community / translation voting
+      summary: Get the next translation item to vote on.
+      parameters:
+      - name: tid
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: Term id (translation system).
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+      description: Requires a logged-in session (see info.description).  Requires a logged-in session.
+  /vote_ajax.php?show=send_vote:
+    get:
+      operationId: vote_ajax_send_vote
+      tags:
+      - Community / translation voting
+      summary: Submit a translation vote (candidate + yes/no) for a term.
+      parameters:
+      - name: cand_id
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Candidate translation id.
+      - name: is_yes
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: 1 = vote yes, 0 = vote no.
+      - name: tid
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: Term id (translation system).
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /vote_ajax.php?show=send_cand_sug:
+    get:
+      operationId: vote_ajax_send_cand_sug
+      tags:
+      - Community / translation voting
+      summary: Suggest a new translation candidate for a term.
+      parameters:
+      - name: text
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Suggested translation text.
+      - name: tid
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: Term id (translation system).
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+      description: Requires a logged-in session (see info.description).  Requires a logged-in session.
+        Requires a logged-in session.
+  /vote_ajax.php?show=send_untranslateable:
+    get:
+      operationId: vote_ajax_send_untranslateable
+      tags:
+      - Community / translation voting
+      summary: Flag a term as not translatable.
+      parameters:
+      - name: tid
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Term id (translation system).
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /vote_ajax.php?show=swith_off_vote_box:
+    get:
+      operationId: vote_ajax_swith_off_vote_box
+      tags:
+      - Community / translation voting
+      summary: Permanently turn off the translation vote box for the user.
+      parameters: []
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /vote_ajax.php?show=set_dialog_data:
+    get:
+      operationId: vote_ajax_set_dialog_data
+      tags:
+      - Community / translation voting
+      summary: Store the translation-vote dialog preferences.
+      parameters:
+      - name: allitjuk
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Dialog preference flag.
+      - name: lang_id
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Language id.
+      - name: optwithcand
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Prefer votes with candidates.
+      - name: optwithoutcand
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Prefer votes without candidates.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+      description: Requires a logged-in session (see info.description).  Requires a logged-in session.
+  /food_operations.php?show=get_bonus_points:
+    get:
+      operationId: food_operations_get_bonus_points
+      tags:
+      - Food operations
+      summary: Get the user's bonus points balance.
+      parameters: []
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BonusPoints'
+  /price_ajax.php?show=add_discount:
+    get:
+      operationId: price_ajax_add_discount
+      tags:
+      - Prices & bonus points
+      summary: Add a discount/price observation for a food in a shop.
+      parameters:
+      - name: food_id
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: Numeric food id.
+      - name: price
+        in: query
+        required: false
+        schema:
+          type: number
+          description: Observed price.
+      - name: price_per_kg
+        in: query
+        required: true
+        schema:
+          type: number
+          description: Price per kg.
+      - name: shop_id
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Shop id in the price database.
+      - name: start_date
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Discount start date.
+      - name: stop_date
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Discount end date.
+      - name: unit_id
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Unit id of the priced quantity.
+      - name: unit_quan
+        in: query
+        required: false
+        schema:
+          type: number
+          description: Quantity of the priced package.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+      description: Requires a logged-in session (see info.description).  Requires a logged-in session.
+  /price_ajax.php?show=send_price:
+    get:
+      operationId: price_ajax_send_price
+      tags:
+      - Prices & bonus points
+      summary: Send a price observation for a food.
+      parameters:
+      - name: food_id
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: Numeric food id.
+      - name: price
+        in: query
+        required: true
+        schema:
+          type: number
+          description: Observed price.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /price_ajax.php?show=discount_incorrect:
+    get:
+      operationId: price_ajax_discount_incorrect
+      tags:
+      - Prices & bonus points
+      summary: Report a price entry as incorrect.
+      parameters:
+      - name: discount_id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Parameter of the discount_id action.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+      description: Requires a logged-in session (see info.description).  Requires a logged-in session.
+  /price_ajax.php?show=clear_showpriceon:
+    get:
+      operationId: price_ajax_clear_showpriceon
+      tags:
+      - Prices & bonus points
+      summary: Turn off price display for the user.
+      parameters: []
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /barcode_ajax.php?show=get_food_info_from_bcode:
+    get:
+      operationId: barcode_ajax_get_food_info_from_bcode
+      tags:
+      - Barcode scanner
+      summary: Look up a food product by barcode/EAN; optionally also check foreign-language product DBs.
+        Returns no_result_found when unknown.
+      parameters:
+      - name: bcode
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Barcode / EAN string.
+      - name: check_foreign_languages_too
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: 1 = also search foreign-language product DBs.
+      security: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+      description: 'Verified live: unknown barcode 86311649 → {"no_result_found":"1"}. Requires a logged-in
+        session.'
+  /barcode_ajax.php?show=get_bcode_code_value:
+    get:
+      operationId: barcode_ajax_get_bcode_code_value
+      tags:
+      - Barcode scanner
+      summary: Get the last scanned barcode value (state shared with the scanner dialog).
+      description: 'Requires a logged-in session. Live-verified 2026-10-04: returns the JSON camera-scanner
+        state. The quagga decoder path is commented out in func5.js, so live camera scanning is disabled
+        in the current build.'
+      parameters: []
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /barcode_ajax.php?show=set_bcode_code_value:
+    get:
+      operationId: barcode_ajax_set_bcode_code_value
+      tags:
+      - Barcode scanner
+      summary: Store the scanned barcode value and scanner device type.
+      parameters:
+      - name: barcode_type
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Barcode symbology type from the scanner.
+      - name: selected_device
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Scanner device identifier.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /barcode_ajax.php?show=link_bcode:
+    get:
+      operationId: barcode_ajax_link_bcode
+      tags:
+      - Barcode scanner
+      summary: Link a barcode to a food/synonym entry.
+      parameters:
+      - name: bcode
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Barcode / EAN string.
+      - name: food_id
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: Numeric food id.
+      - name: syn_id
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Synonym id (barcode linking).
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+      description: 'Requires a logged-in session (see info.description). '
+  /food.php?show=addfood:
+    get:
+      operationId: food_addfood
+      tags:
+      - Diary & calculations
+      summary: Add a food entry to the diary (the core "log food" call). Returns the diary-day JSON when
+        return_json=1.
+      parameters:
+      - name: boxdayoftime
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: 'Meal-of-day slot of the diary entry (0-5: 0 breakfast, 1 snack, 2 lunch, 3 snack,
+            4 dinner, 5 late snack).'
+      - name: boxme
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: Unit id of the chosen measure (from getme), e.g. 25 = dkg.
+      - name: date
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Diary date in YYYY-MM-DD format (site pages use dots, but AJAX uses dashes).
+      - name: day
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Day-of-month (diet group).
+      - name: hour_min
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Time of eating, e.g. "08:30".
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      - name: is_from_speachrecog
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: 1 when the entry was created via speech recognition.
+      - name: month
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Month.
+      - name: option
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Selected unit id (same as boxme in most dialogs).
+      - name: quan
+        in: query
+        required: true
+        schema:
+          type: number
+          description: Amount in the selected unit.
+      - name: return_json
+        in: query
+        required: false
+        schema:
+          type: integer
+          const: 1
+          description: Return JSON instead of the HTML fragment.
+      - name: year
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Year (diary date parts, redundant with date).
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: The refreshed diary day (JSON when return_json=1; plain HTML fragment otherwise).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiaryDayJson'
+            text/html:
+              schema:
+                type: string
+                description: HTML fragment used by the desktop client when return_json is absent.
+      description: Requires a logged-in session (see info.description). The frontend (requires a logged-in
+        session) also sends year/month/day, hour_min and is_from_speachrecog (speech recognition); boxme
+        is the unit id (e.g. 18).
+  /food.php?show=savemodeitemfood:
+    get:
+      operationId: food_savemodeitemfood
+      tags:
+      - Diary & calculations
+      summary: Edit an existing diary food entry (id = diary entry nID).
+      description: 'Requires a logged-in session. Live-verified 2026-10-04: edits the entry in place.
+        Params actually sent (with return_json=1): boxme (new unit dimobj id), boxdayoftimemod (new meal
+        slot), quan, id (diary nID), date (dot format), plusminus (0), hour_min (-1 = no time), getmenew_food_id
+        (food obj id). Response with return_json=1 = the updated day list (same envelope as addfood, including
+        rfoodsum). Changes are visible in getfoods immediately.'
+      parameters:
+      - name: boxdayoftimemod
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: New meal-of-day slot when editing an entry.
+      - name: boxme
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Unit id of the chosen measure (from getme), e.g. 25 = dkg.
+      - name: date
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Diary date in YYYY-MM-DD format (site pages use dots, but AJAX uses dashes).
+      - name: getmenew_food_id
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Food id for the getmenew flow.
+      - name: hour_min
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Time of eating, e.g. "08:30".
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      - name: option
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Selected unit id (same as boxme in most dialogs).
+      - name: plusminus
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: 1 = increase, 2 = decrease the amount.
+      - name: quan
+        in: query
+        required: true
+        schema:
+          type: number
+          description: Amount in the selected unit.
+      - name: return_json
+        in: query
+        required: true
+        schema:
+          type: integer
+          const: 1
+          description: Return JSON instead of the HTML fragment.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food.php?show=delfood:
+    get:
+      operationId: food_delfood
+      tags:
+      - Diary & calculations
+      summary: Delete one diary food entry.
+      parameters:
+      - name: date
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Diary date in YYYY-MM-DD format (site pages use dots, but AJAX uses dashes).
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: integer
+        description: Diary entry id (fooduser nID from getfoods), not the food id. The desktop web client
+          sends the legacy "<food-id>_<unit-id>" string; the JSON API (return_json=1) uses the numeric
+          entry id.
+      - name: return_json
+        in: query
+        required: false
+        schema:
+          type: integer
+          const: 1
+          description: Return JSON instead of the HTML fragment.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: The refreshed diary day after deletion.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiaryDayJson'
+            text/html:
+              schema:
+                type: string
+                description: HTML fragment used by the desktop client when return_json is absent.
+      description: Requires a logged-in session (see info.description).  Requires a logged-in session.
+  /food.php?show=additional_eating:
+    get:
+      operationId: food_additional_eating
+      tags:
+      - Diary & calculations
+      summary: Voice-input "I ate more of the last item" — add quan in the last added entry's unit. quan
+        **in the last added diary entry''s unit** (e.g. 1 → 51 darab after a 50-darab egg entry) and returns
+        the updated fubox/day JSON. Empty response when there is no recent entry for the day.'
+      parameters:
+      - name: date
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Diary date in YYYY-MM-DD format (site pages use dots, but AJAX uses dashes).
+      - name: quan
+        in: query
+        required: false
+        schema:
+          type: number
+          description: Amount in the selected unit.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food.php?show=copykaja:
+    get:
+      operationId: food_copykaja
+      tags:
+      - Diary & calculations
+      summary: Copy a diary entry to another date/meal.
+      parameters:
+      - name: date_to
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Target date for copies (YYYY-MM-DD).
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      - name: tod
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Meal-of-day slot (0-5).
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+      description: Requires a logged-in session (see info.description).  Requires a logged-in session.
+  /food.php?show=copykajaall:
+    get:
+      operationId: food_copykajaall
+      tags:
+      - Diary & calculations
+      summary: Copy a whole meal slot to another date.
+      parameters:
+      - name: date_to
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Target date for copies (YYYY-MM-DD).
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food.php?show=copykajaall_2:
+    get:
+      operationId: food_copykajaall_2
+      tags:
+      - Diary & calculations
+      summary: Copy a whole day of foods to another date.
+      parameters:
+      - name: date_from
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Source date for copies (YYYY-MM-DD).
+      - name: date_to
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Target date for copies (YYYY-MM-DD).
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+      description: 'Requires a logged-in session (see info.description). '
+  /food.php?show=copykajaday:
+    get:
+      operationId: food_copykajaday
+      tags:
+      - Diary & calculations
+      summary: Copy selected meal slot(s) between dates.
+      parameters:
+      - name: date
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Diary date in YYYY-MM-DD format (site pages use dots, but AJAX uses dashes).
+      - name: date_from
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Source date for copies (YYYY-MM-DD).
+      - name: date_to
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Target date for copies (YYYY-MM-DD).
+      - name: id
+        in: query
+        required: false
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      - name: tod
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Meal-of-day slot (0-5).
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+      description: Requires a logged-in session (see info.description).  Requires a logged-in session.
+  /food.php?show=copysport:
+    get:
+      operationId: food_copysport
+      tags:
+      - Diary & calculations
+      summary: Copy one sport entry to another date.
+      parameters:
+      - name: date_to
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Target date for copies (YYYY-MM-DD).
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food.php?show=copysportall:
+    get:
+      operationId: food_copysportall
+      tags:
+      - Diary & calculations
+      summary: Copy all sport entries of a day to another date.
+      parameters:
+      - name: date_to
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Target date for copies (YYYY-MM-DD).
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+      description: Requires a logged-in session (see info.description).  Requires a logged-in session.
+  /food.php?show=refreshfood:
+    get:
+      operationId: food_refreshfood
+      tags:
+      - Diary & calculations
+      summary: Recompute/refresh the food list of a diary day (HTML fragment or JSON with return_json=1).
+      parameters:
+      - name: date
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Diary date in YYYY-MM-DD format (site pages use dots, but AJAX uses dashes).
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            text/html: {}
+  /food.php?show=refreshsport:
+    get:
+      operationId: food_refreshsport
+      tags:
+      - Diary & calculations
+      summary: Recompute/refresh the sport list of a diary day.
+      parameters:
+      - name: date
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Diary date in YYYY-MM-DD format (site pages use dots, but AJAX uses dashes).
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            text/html: {}
+      description: 'Requires a logged-in session. Live-verified 2026-10-03: recomputes the sport list;
+        treat rsportssum as display-only.'
+  /food.php?show=addsport:
+    get:
+      operationId: food_addsport
+      summary: Add a sport activity entry to the diary.
+      description: 'Requires a logged-in session. Live-verified 2026-10-04: adds the sport entry and returns
+        the updated day payload (also available with return_json=1): response {rsports:[entry], rsportssum:"-9054",
+        last_10_sports:[...]}. Entry: nID (diary id, use for delsport), nCalorie (627.29), cDisplayName,
+        unitDisplayName (UNITS_ constant), nQuantity, nWeight (user weight at calc time), nValue, nSportUnitRef,
+        sport_id. rsportssum is NEGATIVE and did not change consistently with the add/delete of a day
+        entry (-9054 after add, -9681 after delete) — semantics unclear, do not rely on it.'
+      tags:
+      - Diary & calculations
+      parameters:
+      - name: boxme
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: Unit id of the chosen measure (from getme), e.g. 25 = dkg.
+      - name: date
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Diary date in YYYY-MM-DD format (site pages use dots, but AJAX uses dashes).
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      - name: option
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Selected unit id (same as boxme in most dialogs).
+      - name: quan
+        in: query
+        required: true
+        schema:
+          type: number
+          description: Amount in the selected unit.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food.php?show=addnewsport:
+    get:
+      operationId: food_addnewsport
+      tags:
+      - Diary & calculations
+      summary: Create a new custom sport activity (name, kcal/kg, description, recommend flags).
+      parameters:
+      - name: boxme
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Unit id of the chosen measure (from getme), e.g. 25 = dkg.
+      - name: cal
+        in: query
+        required: false
+        schema:
+          type: number
+          description: Calories of the new food (kcal/100).
+      - name: chknewsportajanl
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: 1 = recommend the sport to other users.
+      - name: chknewsportdata
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: 1 = data was checked.
+      - name: date
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Diary date in YYYY-MM-DD format (site pages use dots, but AJAX uses dashes).
+      - name: option
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Selected unit id (same as boxme in most dialogs).
+      - name: quan
+        in: query
+        required: false
+        schema:
+          type: number
+          description: Amount in the selected unit.
+      - name: sportname
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Name of the new sport.
+      - name: txtnewsportdesc
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Description of the new sport.
+      - name: txtnewsportkg
+        in: query
+        required: false
+        schema:
+          type: number
+          description: kcal/kg of the new sport activity.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+      description: Requires a logged-in session (see info.description).  Requires a logged-in session.
+  /food.php?show=loadnewsport:
+    get:
+      operationId: food_loadnewsport
+      tags:
+      - Diary & calculations
+      summary: Load the newly created sport entry (for the editor).
+      parameters:
+      - name: id
+        in: query
+        required: false
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food.php?show=delsport:
+    get:
+      operationId: food_delsport
+      tags:
+      - Diary & calculations
+      summary: Delete a sport entry from the diary.
+      parameters:
+      - name: date
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Diary date in YYYY-MM-DD format (site pages use dots, but AJAX uses dashes).
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+      description: 'Requires a logged-in session (see info.description). '
+  /food.php?show=savemodeitemsport:
+    get:
+      operationId: food_savemodeitemsport
+      tags:
+      - Diary & calculations
+      summary: Edit an existing sport diary entry.
+      parameters:
+      - name: boxme
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Unit id of the chosen measure (from getme), e.g. 25 = dkg.
+      - name: date
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Diary date in YYYY-MM-DD format (site pages use dots, but AJAX uses dashes).
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      - name: option
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Selected unit id (same as boxme in most dialogs).
+      - name: quan
+        in: query
+        required: true
+        schema:
+          type: number
+          description: Amount in the selected unit.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+      description: Requires a logged-in session (see info.description).  Requires a logged-in session.
+  /food.php?show=delfastbutton:
+    get:
+      operationId: food_delfastbutton
+      tags:
+      - Diary & calculations
+      summary: Remove a food/sport from the quick-buttons.
+      parameters:
+      - name: fb_table_id
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: Fast-button table id.
+      - name: obj_id
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: Numeric object id (food or diary object).
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food.php?show=favfood_button_assign:
+    get:
+      operationId: food_favfood_button_assign
+      tags:
+      - Diary & calculations
+      summary: Assign favourites to quick-buttons.
+      description: 'Probed 2026-10-04: 200 with empty body. JS params: fav_id, obj_id, unit_id, quan,
+        col, button_id_arr (one of 14 quick buttons). The assigned button did NOT appear in getfoods.favbuts
+        — that list is likely populated by the mobile app; effect unverified.'
+      parameters:
+      - name: button_id
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: Quick-button slot id.
+      - name: button_id_arr
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Comma-separated quick-button ids.
+      - name: col
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Column index of the quick-button grid.
+      - name: fav_id
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: Favourite id (as returned by addfavfood).
+      - name: obj_id
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Numeric object id (food or diary object).
+      - name: quan
+        in: query
+        required: false
+        schema:
+          type: number
+          description: Amount in the selected unit.
+      - name: unit_id
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Unit id of the priced quantity.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food.php?show=ownedfood_fastbutton_assign:
+    get:
+      operationId: food_ownedfood_fastbutton_assign
+      tags:
+      - Diary & calculations
+      summary: Assign own foods to quick-buttons.
+      parameters:
+      - name: button_id
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: Quick-button slot id.
+      - name: button_id_arr
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Comma-separated quick-button ids.
+      - name: col
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Column index of the quick-button grid.
+      - name: obj_id
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: Numeric object id (food or diary object).
+      - name: quan
+        in: query
+        required: false
+        schema:
+          type: number
+          description: Amount in the selected unit.
+      - name: unit_id
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Unit id of the priced quantity.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+      description: 'Requires a logged-in session (see info.description). '
+  /food.php?show=addfavfood:
+    get:
+      operationId: food_addfavfood
+      tags:
+      - Diary & calculations
+      summary: Add a food to the user's favourites. Responds with plain text (shown in an alert() by the
+        web client).
+      parameters:
+      - name: boxme
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Unit id of the chosen measure (from getme), e.g. 25 = dkg.
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      - name: quan
+        in: query
+        required: false
+        schema:
+          type: number
+          description: Amount in the selected unit.
+      - name: synonym
+        in: query
+        required: false
+        schema:
+          type: integer
+        description: Synonym id (nSynonymFoodRef), when adding a synonym variant of the food.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+      description: Requires a logged-in session (see info.description).  Requires a logged-in session.
+  /food.php?show=addfavsport:
+    get:
+      operationId: food_addfavsport
+      tags:
+      - Diary & calculations
+      summary: Add a sport to the favourites.
+      parameters:
+      - name: boxsme
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Unit id of the chosen sport measure.
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      - name: option
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Selected unit id (same as boxme in most dialogs).
+      - name: quan
+        in: query
+        required: false
+        schema:
+          type: number
+          description: Amount in the selected unit.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food.php?show=delfavfood:
+    get:
+      operationId: food_delfavfood
+      tags:
+      - Diary & calculations
+      summary: Remove a food from the user's favourites.
+      description: 'Live-verified 2026-10-04 correction: the current JS sends **fav_id** (requires a logged-in
+        session) + **obj_id** (not `id`); with those the response is `"Törlés sikerült!"` and the fav
+        disappears from the search response''s `food_id_2_fav` immediately. Bare `id=` returns `"no_rows"`
+        (no-op).'
+      parameters:
+      - name: fav_id
+        in: query
+        required: true
+        schema:
+          type: integer
+        description: The favourites-row id (from addfavfood''s `fav_id` or `food_id_2_fav[fid].fav_id`).
+      - name: obj_id
+        in: query
+        required: true
+        schema:
+          type: integer
+        description: The food obj id.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food2.php?show=addfavmeal:
+    get:
+      operationId: food2_addfavmeal
+      tags:
+      - Food data
+      summary: Save a whole meal (date + meal slot) as a favourite meal with a name.
+      parameters:
+      - name: date
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Diary date in dot format YYYY.MM.DD (verified live 2026-10-03 with "2026.10.03").
+      - name: name
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Name of the favourite meal.
+      - name: tod
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: Meal-of-day slot (0-5).
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: '''{"ok":1}'' on success (verified live 2026-10-03). The saved favourite
+
+            meal is later listed by getfood search inside results1, where each item
+
+            carries favmeal_id (= the favmeal''s nId), nTod and dDate - the client
+
+            re-adds its diary items one by one when the user picks it.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: integer
+                    example: 1
+      description: Requires a logged-in session (see info.description). Verified (requires a logged-in
+        session) live 2026-10-03.
+  /food2.php?show=delfavmeal:
+    get:
+      operationId: food2_delfavmeal
+      tags:
+      - Diary & calculations
+      summary: Delete a favourite meal.
+      description: 'Requires a logged-in session. Live-verified 2026-10-04: id 46935 deleted; the meal
+        vanished from the getfood results1 listing immediately after. NOTE: this endpoint lives on food2.php,
+        not food.php (a call to food.php returns an empty 200 without deleting anything). Id 46935 confirmed
+        as favmeal id.'
+      parameters:
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: Favourite-meal id (favmeal_id / nId from the getfood search results1 listing).
+            Not a diary-item id.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food.php?show=addnewfood:
+    get:
+      operationId: food_addnewfood
+      tags:
+      - Diary & calculations
+      summary: Create a new food (name, kcal/100, protein/carbo/fat per 100, unit, category, description,
+        recommend/checked flags).
+      parameters:
+      - name: boxegyseg
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Custom unit name for the new food.
+      - name: boxme
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Unit id of the chosen measure (from getme), e.g. 25 = dkg.
+      - name: cal
+        in: query
+        required: true
+        schema:
+          type: number
+          description: Calories of the new food (kcal/100).
+      - name: chkegyseg
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: 1 = use the custom unit name.
+      - name: chknewfoodajanl
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: 1 = recommend the food to other users.
+      - name: chknewfooddata
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: 1 = data was checked (double-entry confirmation).
+      - name: date
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Diary date in YYYY-MM-DD format (site pages use dots, but AJAX uses dashes).
+      - name: edit_page_lang_id
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Language id of the edit page.
+      - name: foodid
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Id of the food being edited (0 = new).
+      - name: foodname
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Name of the new food.
+      - name: nCategoryRef
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Food category id.
+      - name: option
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Selected unit id (same as boxme in most dialogs).
+      - name: quan
+        in: query
+        required: false
+        schema:
+          type: number
+          description: Amount in the selected unit.
+      - name: txtnewfooddesc
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Description of the new food/sport.
+      - name: txtnewfoodfeherje
+        in: query
+        required: false
+        schema:
+          type: number
+          description: Protein (g/100).
+      - name: txtnewfoodszen
+        in: query
+        required: false
+        schema:
+          type: number
+          description: Carbohydrate (g/100).
+      - name: txtnewfoodzsir
+        in: query
+        required: false
+        schema:
+          type: number
+          description: Fat (g/100).
+      - name: txtrecfoodquan
+        in: query
+        required: false
+        schema:
+          type: number
+          description: Amount for recipe ingredient.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+      description: Requires a logged-in session (see info.description).  Requires a logged-in session.
+        Requires a logged-in session.
+  /food.php?show=loadnewfood:
+    get:
+      operationId: food_loadnewfood
+      tags:
+      - Diary & calculations
+      summary: Load the newly created food entry (for the editor).
+      parameters:
+      - name: id
+        in: query
+        required: false
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food.php?show=addnewrecfood:
+    get:
+      operationId: food_addnewrecfood
+      tags:
+      - Diary & calculations
+      summary: Create a new recipe (name, category, description, 3 ingredient slots with unit+quantity,
+        drink flag).
+      description: 'Requires a logged-in session. Legacy: live probing 2026-10-04 returns 404 and is not
+        referenced anywhere in the current frontend JS. Recipe creation/edit happens through the dedicated
+        pages /receptszerkesztes/<name>/<id>_0 (see ppp_edit in func2.js). food2.php?show=addnewrecfood
+        returns an empty 200.'
+      parameters:
+      - name: boxme_a
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Parameter of the boxme_a action.
+      - name: boxme_b
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Parameter of the boxme_b action.
+      - name: boxme_c
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Parameter of the boxme_c action.
+      - name: chkegyseg_a
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Parameter of the chkegyseg_a action.
+      - name: chkegyseg_b
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Parameter of the chkegyseg_b action.
+      - name: chkegyseg_c
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Parameter of the chkegyseg_c action.
+      - name: chknewfoodajanl
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: 1 = recommend the food to other users.
+      - name: chknewfooddesc
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Parameter of the chknewfooddesc action.
+      - name: foodname
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Name of the new food.
+      - name: nCategoryRef
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Food category id.
+      - name: quan_a
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Parameter of the quan_a action.
+      - name: quan_b
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Parameter of the quan_b action.
+      - name: quan_c
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Parameter of the quan_c action.
+      - name: radiorecfooddrink
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: 1 = the recipe is a drink.
+      - name: txtnewfooddesc
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Description of the new food/sport.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food.php?show=addrecfood:
+    get:
+      operationId: food_addrecfood
+      tags:
+      - Diary & calculations
+      summary: Add an ingredient to the recipe being edited (LEGACY — 404, see addnewrecfood).
+      parameters:
+      - name: boxme
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: Unit id of the chosen measure (from getme), e.g. 25 = dkg.
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      - name: option
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Selected unit id (same as boxme in most dialogs).
+      - name: quan
+        in: query
+        required: true
+        schema:
+          type: number
+          description: Amount in the selected unit.
+      - name: txtrectype
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Recipe type slot (1-3).
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+      description: Requires a logged-in session (see info.description).  Requires a logged-in session.
+  /food.php?show=delrecfood:
+    get:
+      operationId: food_delrecfood
+      tags:
+      - Diary & calculations
+      summary: Remove an ingredient from the recipe being edited.
+      parameters:
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      - name: txtrectype
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: Recipe type slot (1-3).
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food_operations.php?show=delownfood:
+    get:
+      operationId: food_operations_delownfood
+      tags:
+      - Food operations
+      summary: Delete the own food entry.
+      parameters:
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+      description: Requires a logged-in session (see info.description).  Requires a logged-in session.
+  /food.php?show=delrecall:
+    get:
+      operationId: food_delrecall
+      tags:
+      - Diary & calculations
+      summary: Delete a recipe recall/reference.
+      parameters: []
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food2.php?show=savefoodinfo:
+    get:
+      operationId: food2_savefoodinfo
+      tags:
+      - Food data
+      summary: Save edited food metadata (name, category, description, nutrients) as a `values` JSON.
+      parameters:
+      - name: food_id
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: Numeric food id.
+      - name: values
+        in: query
+        required: true
+        schema:
+          type: string
+          description: JSON object with the edited food fields (savefoodinfo).
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+      description: Requires a logged-in session (see info.description).  Requires a logged-in session.
+  /food2.php?show=corrector_food_del:
+    get:
+      operationId: food2_corrector_food_del
+      tags:
+      - Food data
+      summary: 'Food-content correction queue: delete a flagged food (moderator action).'
+      parameters:
+      - name: food_id
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: Numeric food id.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food2.php?show=fullfn_set_prop_type:
+    get:
+      operationId: food2_fullfn_set_prop_type
+      tags:
+      - Food data
+      summary: Set the nutrient-column display type (which columns show in full-function tables).
+      parameters:
+      - name: prop_type
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Nutrient column display type id.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+      description: Requires a logged-in session (see info.description).  Requires a logged-in session.
+  /food2.php?show=report_approved_food_error:
+    get:
+      operationId: food2_report_approved_food_error
+      tags:
+      - Food data
+      summary: Report an error in an approved (community-checked) food.
+      parameters:
+      - name: food_id
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: Numeric food id.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food2.php?show=report_grey_food_error:
+    get:
+      operationId: food2_report_grey_food_error
+      tags:
+      - Food data
+      summary: Report an error in a not-yet-approved ("grey") food.
+      parameters:
+      - name: food_id
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: Numeric food id.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+      description: Requires a logged-in session (see info.description).  Requires a logged-in session.
+  /food2.php?show=rating_vote:
+    get:
+      operationId: food2_rating_vote
+      tags:
+      - Food data
+      summary: Rate a food up/down.
+      parameters:
+      - name: is_up
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: 1 = rate up, 0 = rate down.
+      - name: obj_id
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: Numeric object id (food or diary object).
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food2.php?show=id_2_pic_id:
+    get:
+      operationId: food2_id_2_pic_id
+      tags:
+      - Food data
+      summary: Resolve the food photo id and clean name for a food (used to build image URLs).
+      parameters:
+      - name: food_id
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: Numeric food id.
+      - name: obj_id
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: Numeric object id (food or diary object).
+      security: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PicId'
+  /food2.php?show=usda_load:
+    get:
+      operationId: food2_usda_load
+      tags:
+      - Food data
+      summary: Import nutrient data from the USDA database into a user food.
+      parameters:
+      - name: food_id
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: Numeric food id.
+      - name: usda_food_id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: USDA database food id.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+      description: Requires a logged-in session (see info.description).  Requires a logged-in session.
+  /food.php?show=getrecfood_b:
+    get:
+      operationId: food_getrecfood_b
+      tags:
+      - Diary & calculations
+      summary: Get the recipe ingredient list block (HTML, "b" variant).
+      parameters:
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: 'Food/recipe/diary-item id in the site format: "<numeric-id>_<unit-id>", e.g. "1147_0"
+            or "2088_0".'
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            text/html: {}
+  /food.php?show=addweight:
+    get:
+      operationId: food_addweight
+      tags:
+      - Diary & calculations
+      summary: Save the body weight for a date.
+      parameters:
+      - name: date
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Diary date in YYYY-MM-DD format (site pages use dots, but AJAX uses dashes).
+      - name: weight
+        in: query
+        required: true
+        schema:
+          type: number
+          description: Body weight in kg.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+      description: Requires a logged-in session (see info.description).  Requires a logged-in session.
+  /food.php?show=addsizes:
+    get:
+      operationId: food_addsizes
+      tags:
+      - Diary & calculations
+      summary: Save body size/measurements for a date (JSON in `data`).
+      parameters:
+      - name: data
+        in: query
+        required: true
+        schema:
+          type: string
+          description: JSON blob with the measurements (sizes dialog).
+      - name: date
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Diary date in YYYY-MM-DD format (site pages use dots, but AJAX uses dashes).
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food.php?show=addwater:
+    get:
+      operationId: food_addwater
+      tags:
+      - Diary & calculations
+      summary: Add one glass of water for a date.
+      parameters:
+      - name: date
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Diary date in YYYY-MM-DD format (site pages use dots, but AJAX uses dashes).
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+      description: Requires a logged-in session (see info.description).  Requires a logged-in session.
+  /food.php?show=setwater:
+    get:
+      operationId: food_setwater
+      tags:
+      - Diary & calculations
+      summary: Set the water goal and consumed water for a date. (ml), date (dot format). Empty 200 on
+        success. Follow with resetwater to clear the day''s consumed amount.'
+      parameters:
+      - name: waterGoal
+        in: query
+        required: false
+        schema:
+          type: number
+          description: Daily water goal.
+      - name: waterquan
+        in: query
+        required: true
+        schema:
+          type: number
+          description: Consumed water amount.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food.php?show=resetwater:
+    get:
+      operationId: food_resetwater
+      tags:
+      - Diary & calculations
+      summary: Reset the water log for a date.
+      parameters:
+      - name: date
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Diary date in YYYY-MM-DD format (site pages use dots, but AJAX uses dashes).
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+      description: Requires a logged-in session (see info.description).  Requires a logged-in session.
+  /food.php?show=speachrecog_autos_set:
+    get:
+      operationId: food_speachrecog_autos_set
+      tags:
+      - Diary & calculations
+      summary: Store the auto-send setting of speech recognition.
+      parameters:
+      - name: auto_value
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Speech-recognition auto-send flag.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food.php?show=keepcon:
+    get:
+      operationId: food_keepcon
+      tags:
+      - Diary & calculations
+      summary: Session keep-alive ping (called periodically by the SPA).
+      parameters: []
+      security: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food.php?show=moveuser:
+    get:
+      operationId: food_moveuser
+      tags:
+      - Diary & calculations
+      summary: Register/login handler of the legacy "move user" flow (user name, password, email).
+      parameters:
+      - name: fbCloseEmail
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Email for the move-user (login/register) flow.
+      - name: fbClosePsw
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Password for the move-user flow.
+      - name: fbCloseUser
+        in: query
+        required: true
+        schema:
+          type: string
+          description: User name for the move-user flow.
+      security: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            text/html: {}
+      description: Legacy login/register handler; the modern flow is the /regisztracio and /belepes pages.
+  /food2.php?show=diet_group_join_group:
+    get:
+      operationId: food2_diet_group_join_group
+      tags:
+      - Food data
+      summary: Join a diet/weight-loss group (start weight, target end weight).
+      parameters:
+      - name: day
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Day-of-month (diet group).
+      - name: end_weight
+        in: query
+        required: false
+        schema:
+          type: number
+          description: Target weight when joining a diet group.
+      - name: group_id
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: Diet group id.
+      - name: month_id
+        in: query
+        required: false
+        schema:
+          type: integer
+          description: Month id (diet group).
+      - name: start_weight
+        in: query
+        required: false
+        schema:
+          type: number
+          description: Starting weight when joining a diet group.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+      description: Requires a logged-in session (see info.description).  Requires a logged-in session.
+        Requires a logged-in session.
+  /food2.php?show=diet_group_disjoin:
+    get:
+      operationId: food2_diet_group_disjoin
+      tags:
+      - Food data
+      summary: Leave a diet/weight-loss group.
+      parameters:
+      - name: group_id
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: Diet group id.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food2.php?show=premweek_activate:
+    get:
+      operationId: food2_premweek_activate
+      tags:
+      - Food data
+      summary: Activate a premium week (trial).
+      parameters: []
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food.php?show=share:
+    get:
+      operationId: food_share
+      tags:
+      - Diary & calculations
+      summary: Create a share message for social media (4 message parts + kcal) and get a share URL.
+      parameters:
+      - name: kcal
+        in: query
+        required: false
+        schema:
+          type: number
+          description: Calories to share.
+      - name: msg1
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Share message part 1.
+      - name: msg2
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Share message part 2.
+      - name: msg3
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Share message part 3.
+      - name: msg4
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Share message part 4.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+      description: Requires a logged-in session (see info.description). The share (requires a logged-in
+        session) (requires a logged-in session) endpoint builds a public share page; found in the JS bundle,
+        not probed live.
+  /food2.php?show=user_hid_admob_panel:
+    get:
+      operationId: food2_user_hid_admob_panel
+      tags:
+      - Food data
+      summary: Hide the AdMob ad panel (mobile).
+      parameters: []
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food2.php?show=admob_save_done_today:
+    get:
+      operationId: food2_admob_save_done_today
+      tags:
+      - Food data
+      summary: Store that the user already saw today ad (mobile).
+      parameters: []
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food2.php?show=get_admob_bigp_refresh_data:
+    get:
+      operationId: food2_get_admob_bigp_refresh_data
+      tags:
+      - Food data
+      summary: Get ad revenue/refresh data (forint per N thousand impressions).
+      description: 'Live-verified 2026-10-04: empty 200 (no ad config on this account). Requires a logged-in
+        session. Requires a logged-in session.'
+      parameters: []
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food2.php?show=ct_get_top300_ajax:
+    get:
+      operationId: food2_ct_get_top300_ajax
+      tags:
+      - Food data
+      summary: Get the "top 300" food list of a category (the calorie-table page).
+      parameters:
+      - name: categ_id
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: Top-300 category id (0 = all, 16/18 = food categories, 10 = low-carb etc.).
+      security: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food_operations.php?show=cookie_layer_ok:
+    get:
+      operationId: food_operations_cookie_layer_ok
+      tags:
+      - Food operations
+      summary: Acknowledge the cookie-consent layer (stored server-side).
+      parameters: []
+      security: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+  /food2.php?show=big_delete:
+    get:
+      operationId: food2_big_delete
+      tags:
+      - Food data
+      summary: Delete the whole user account (requires the account password).
+      parameters:
+      - name: pwd
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Account password (big_delete).
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: See API description for response conventions.
+          content:
+            application/json: {}
+      description: 'Requires a logged-in session (see info.description). Dangerous: (requires a logged-in
+        session) deletes the whole account.'
+  /food.php?show=delfoodall:
+    get:
+      operationId: food2_delfoodall
+      tags:
+      - Food data
+      summary: Delete the whole diary day.
+      parameters:
+      - name: date
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Diary date in YYYY-MM-DD format (site pages use dots, but AJAX uses dashes).
+      - name: return_json
+        in: query
+        required: true
+        schema:
+          type: integer
+          const: 1
+          description: Return JSON instead of the HTML fragment.
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: The refreshed diary day after deletion.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiaryDayJson'
+            text/html:
+              schema:
+                type: string
+                description: HTML fragment used by the desktop client when return_json is absent.
+  /food.php?show=delfoodtod:
+    get:
+      operationId: food2_delfoodtod
+      tags:
+      - Food data
+      summary: Delete all diary entries of one meal slot on a date.
+      parameters:
+      - name: date
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Diary date in YYYY-MM-DD format (site pages use dots, but AJAX uses dashes).
+      - name: return_json
+        in: query
+        required: true
+        schema:
+          type: integer
+          const: 1
+          description: Return JSON instead of the HTML fragment.
+      - name: tod
+        in: query
+        required: true
+        schema:
+          type: integer
+          description: Meal-of-day slot (0-5).
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: The refreshed diary day after deletion.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiaryDayJson'
+            text/html:
+              schema:
+                type: string
+                description: HTML fragment used by the desktop client when return_json is absent.
+      description: 'Requires a logged-in session (see info.description). '
+  /:
+    get:
+      summary: Homepage (login form when logged out)
+      description: Verified 2026-10-04. When logged out this serves the `#loginForm` (hidden `myt` CSRF
+        field). When a valid `myPHP83SESSID` cookie is sent it renders the logged-in dashboard instead
+        — no `myt` anywhere. Use this page to obtain `myt` before `POST /bejelentkezes`.
+      tags:
+      - Authentication
+      responses:
+        '200':
+          description: HTML page
+  /bejelentkezes:
+    post:
+      summary: Log in (the real form action)
+      description: Verified live 2026-10-04 with a test account. Consumes the `myt` CSRF token from `GET
+        /` and sets `myPHP83SESSID` on success. Form-urlencoded; `mode=get` is what the real form sends.
+        On failure the page re-renders with an error message; a 200 can also mean "already logged in".
+      tags:
+      - Authentication
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required:
+              - mode
+              - myt
+              - txtusern
+              - txtpassw
+              properties:
+                mode:
+                  type: string
+                  enum:
+                  - get
+                  description: Always "get" (form constant).
+                myt:
+                  type: string
+                  description: CSRF token from the homepage form.
+                txtusern:
+                  type: string
+                  description: User name / e-mail.
+                txtpassw:
+                  type: string
+                  description: Password.
+      responses:
+        '200':
+          description: Logged-in homepage (HTML). Sets myPHP83SESSID.
+  /login:
+    get:
+      summary: Legacy login URL — now a redirect
+      description: 'Verified 2026-10-04: returns HTTP 302 to `/`. It no longer serves a login form; do
+        not scrape `myt` from here.'
+      tags:
+      - Authentication
+      responses:
+        '302':
+          description: Redirect to / (homepage).
+  /kijelentkezes:
+    get:
+      summary: Log out
+      description: 'Verified 2026-10-04: HTTP 302 and the session is destroyed — the next homepage render
+        shows the login form again and per-user calls behave as guest.'
+      tags:
+      - Authentication
+      responses:
+        '302':
+          description: Redirect; session destroyed.
