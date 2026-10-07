@@ -1,3 +1,4 @@
+// ignore_for_file: avoid_print
 // Live round-trip against kaloriabazis.hu. Skipped unless `.env.test`
 // (KB_USER / KB_PASS) exists. Run with: flutter test test/live_api_test.dart
 import 'dart:io';

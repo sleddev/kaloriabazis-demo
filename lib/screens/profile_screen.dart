@@ -59,8 +59,9 @@ class ProfileScreen extends StatelessWidget {
     if (v == null || v < 20 || v > 400 || !context.mounted) return;
     try {
       await app.setWeight(v);
-      if (context.mounted)
+      if (context.mounted) {
         _snack(context, 'Testsúly rögzítve: ${v.toStringAsFixed(1)} kg');
+      }
     } on KbException catch (e) {
       if (context.mounted) _snack(context, e.message);
     }

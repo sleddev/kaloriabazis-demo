@@ -135,8 +135,9 @@ class _AddFoodScreenState extends State<AddFoodScreen> {
         quantity: f.quantity,
         meal: meal,
       );
-      if (mounted)
+      if (mounted) {
         _confirm('${f.name} → ${meal.label} · ${fmtKcal(f.kcal)} kcal');
+      }
     } on KbException catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context)
@@ -425,7 +426,7 @@ class _FoodRow extends StatelessWidget {
               ],
             ),
           ),
-          if (trailing != null) trailing!,
+          ?trailing,
         ],
       ),
     ),
